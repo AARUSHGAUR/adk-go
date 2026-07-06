@@ -46,7 +46,7 @@ func TestRestRequester_Get_RelativePathAndHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	var page AgentsPage
+	var page ListAgentsResponse
 	params := url.Values{}
 	params.Set("pageSize", "5")
 	if err := newTestRequester(srv).Get(context.Background(), "agents", params, &page); err != nil {
@@ -117,7 +117,7 @@ func TestRestRequester_Get_DecodeError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := newTestRequester(srv).Get(context.Background(), "agents", nil, &AgentsPage{})
+	err := newTestRequester(srv).Get(context.Background(), "agents", nil, &ListAgentsResponse{})
 	if err == nil {
 		t.Fatal("Get() error = nil, want a decode error")
 	}

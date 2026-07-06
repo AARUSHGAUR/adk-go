@@ -83,20 +83,20 @@ type Endpoint struct {
 	Attributes  map[string]any `json:"attributes,omitempty"`
 }
 
-// AgentsPage is one page of a ListAgents response.
-type AgentsPage struct {
+// ListAgentsResponse is one page of a [Client.ListAgents] response.
+type ListAgentsResponse struct {
 	Agents        []Agent `json:"agents,omitempty"`
 	NextPageToken string  `json:"nextPageToken,omitempty"`
 }
 
-// McpServersPage is one page of a ListMcpServers response.
-type McpServersPage struct {
+// ListMcpServersResponse is one page of a [Client.ListMcpServers] response.
+type ListMcpServersResponse struct {
 	McpServers    []McpServer `json:"mcpServers,omitempty"`
 	NextPageToken string      `json:"nextPageToken,omitempty"`
 }
 
-// EndpointsPage is one page of a ListEndpoints response.
-type EndpointsPage struct {
+// ListEndpointsResponse is one page of a [Client.ListEndpoints] response.
+type ListEndpointsResponse struct {
 	Endpoints     []Endpoint `json:"endpoints,omitempty"`
 	NextPageToken string     `json:"nextPageToken,omitempty"`
 }
