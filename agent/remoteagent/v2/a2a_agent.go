@@ -29,6 +29,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/log"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/auth"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	iremoteagent "google.golang.org/adk/v2/internal/agent/remoteagent"
 	"google.golang.org/adk/v2/server/adka2a/v2"
@@ -141,6 +142,14 @@ type A2AConfig struct {
 
 	// ClientProvider can be used to provide a custom implementation of A2A message sending.
 	ClientProvider A2AClientProvider
+
+	// Auth, when set, resolves and attaches a credential to every outgoing A2A
+	// request whose agent card declares a matching security requirement. It wires
+	// an a2aclient.AuthInterceptor backed by Auth into the default client and
+	// scopes it to the ADK session. Auth cannot be combined with a custom
+	// ClientProvider (which builds its own client); set one or the other. See
+	// package google.golang.org/adk/v2/auth.
+	Auth auth.CredentialProvider
 	// MessageSendConfig is attached to a2a.SendMessageRequest sent on every agent invocation.
 	MessageSendConfig *a2a.SendMessageConfig
 
@@ -157,8 +166,17 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.AgentCard == nil && cfg.AgentCardProvider == nil {
 		return nil, fmt.Errorf("either AgentCard or AgentCardProvider must be provided")
 	}
+	if cfg.Auth != nil && cfg.ClientProvider != nil {
+		return nil, fmt.Errorf("A2AConfig.Auth cannot be combined with a custom ClientProvider; wire the credential into your ClientProvider instead")
+	}
 	if cfg.ClientProvider == nil {
-		cfg.ClientProvider = NewA2AClientProvider(a2aclient.NewFactory())
+		var opts []a2aclient.FactoryOption
+		if cfg.Auth != nil {
+			opts = append(opts, a2aclient.WithCallInterceptors(&a2aclient.AuthInterceptor{
+				Service: credentialsService{provider: cfg.Auth},
+			}))
+		}
+		cfg.ClientProvider = NewA2AClientProvider(a2aclient.NewFactory(opts...))
 	}
 
 	remoteAgent := &a2aAgent{
@@ -289,13 +307,20 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return true
 		}
 
+		// The auth interceptor (wired when cfg.Auth is set) resolves credentials
+		// scoped to the session id attached here.
+		var sendCtx context.Context = ctx
+		if cfg.Auth != nil {
+			sendCtx = a2aclient.AttachSessionID(ctx, a2aclient.SessionID(ctx.Session().ID()))
+		}
+
 		if ctx.RunConfig().StreamingMode == agent.StreamingModeNone {
-			a2aEvent, a2aErr := sender.SendMessage(ctx, req)
+			a2aEvent, a2aErr := sender.SendMessage(sendCtx, req)
 			processEvent(a2aEvent, a2aErr)
 			return
 		}
 
-		for a2aEvent, a2aErr := range sender.SendStreamingMessage(ctx, req) {
+		for a2aEvent, a2aErr := range sender.SendStreamingMessage(sendCtx, req) {
 			if !processEvent(a2aEvent, a2aErr) {
 				return
 			}
