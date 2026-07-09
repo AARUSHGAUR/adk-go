@@ -19,6 +19,7 @@ import (
 
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -37,6 +38,9 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 		Actions: session.EventActions{
 			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
 				"call-1": {Hint: "please confirm"},
+			},
+			RequestedCredentials: map[string]authconsent.Request{
+				"call-2": {AuthURI: "https://consent.example", Key: "k1"},
 			},
 		},
 	}
@@ -57,5 +61,8 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 	}
 	if got, ok := back.Actions.RequestedToolConfirmations["call-1"]; !ok || got.Hint != "please confirm" {
 		t.Errorf("RequestedToolConfirmations = %+v, want call-1 hint", back.Actions.RequestedToolConfirmations)
+	}
+	if got, ok := back.Actions.RequestedCredentials["call-2"]; !ok || got.AuthURI != "https://consent.example" {
+		t.Errorf("RequestedCredentials = %+v, want call-2 authUri", back.Actions.RequestedCredentials)
 	}
 }

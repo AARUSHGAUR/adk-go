@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -32,6 +33,7 @@ type EventActions struct {
 	SkipSummarization          bool                                         `json:"skipSummarization,omitempty"`
 	TransferToAgent            string                                       `json:"transferToAgent,omitempty"`
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
+	RequestedCredentials       map[string]authconsent.Request               `json:"requestedCredentials,omitempty"`
 }
 
 // Event represents a single event in a session.
@@ -97,6 +99,7 @@ func ToSessionEvent(event Event) *session.Event {
 			SkipSummarization:          event.Actions.SkipSummarization,
 			TransferToAgent:            event.Actions.TransferToAgent,
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
+			RequestedCredentials:       event.Actions.RequestedCredentials,
 		},
 	}
 }
@@ -134,6 +137,7 @@ func FromSessionEvent(event session.Event) Event {
 			SkipSummarization:          event.Actions.SkipSummarization,
 			TransferToAgent:            event.Actions.TransferToAgent,
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
+			RequestedCredentials:       event.Actions.RequestedCredentials,
 		},
 	}
 }

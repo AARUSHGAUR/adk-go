@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -193,6 +194,11 @@ type commonContext struct {
 	// Fields below are only populated by NewToolContext.
 	functionCallID   string
 	toolConfirmation *toolconfirmation.ToolConfirmation
+
+	// credentialResponse carries the end user's interactive OAuth consent
+	// response on a resumed tool call. Threaded via WithDelta (NewToolContext's
+	// signature is frozen public API), read through AuthResponse.
+	credentialResponse *authconsent.Response
 
 	// Fields below are used by node contexts.
 	// resumeInputs are keyed by InterruptID. Nil on fresh activations
@@ -441,6 +447,29 @@ func (c *commonContext) RequestConfirmation(hint string, payload any) error {
 	// SkipSummarization stops the agent loop after this tool call. Without it,
 	// the function response event becomes lastEvent and IsFinalResponse() returns
 	// false (hasFunctionResponses == true), causing the loop to continue.
+	c.actions.SkipSummarization = true
+	return nil
+}
+
+// AuthResponse returns the interactive OAuth consent response for the current
+// tool call, or nil if none. Populated only on a resumed call (see WithDelta).
+func (c *commonContext) AuthResponse() *authconsent.Response {
+	return c.credentialResponse
+}
+
+// RequestCredential initiates the interactive (3-legged) OAuth consent flow for
+// the current tool call. Like RequestConfirmation, it records the request in the
+// underlying EventActions (keyed by the function call id) and sets
+// SkipSummarization so the agent loop halts until the user responds; the flow
+// then emits the adk_request_credential function call.
+func (c *commonContext) RequestCredential(req authconsent.Request) error {
+	if c.functionCallID == "" {
+		return fmt.Errorf("error function call id not set when requesting credential for tool")
+	}
+	if c.actions.RequestedCredentials == nil {
+		c.actions.RequestedCredentials = make(map[string]authconsent.Request)
+	}
+	c.actions.RequestedCredentials[c.functionCallID] = req
 	c.actions.SkipSummarization = true
 	return nil
 }

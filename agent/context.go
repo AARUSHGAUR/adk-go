@@ -22,6 +22,7 @@ import (
 
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -200,6 +201,21 @@ type Context interface {
 	//     itself (e.g., invalid arguments, issue with the event system). The
 	//     request to ask the user has not been sent.
 	RequestConfirmation(hint string, payload any) error
+
+	// AuthResponse returns the end user's interactive (3-legged) OAuth consent
+	// response for the current tool call, or nil if none is present. A tool
+	// checks it to distinguish its first invocation (nil: request consent via
+	// RequestCredential) from a resumed invocation after the user consented.
+	// It is the credential analog of ToolConfirmation.
+	AuthResponse() *authconsent.Response
+
+	// RequestCredential initiates an interactive (3-legged) OAuth consent
+	// round-trip, asking the user to visit req.AuthURI before the tool proceeds.
+	// It is the credential analog of RequestConfirmation: ADK emits an
+	// adk_request_credential function call and resumes the original tool call
+	// once the client returns the consent response. Returns an error if the
+	// request could not be enqueued (e.g. missing function call id).
+	RequestCredential(req authconsent.Request) error
 
 	// Workflow node section
 

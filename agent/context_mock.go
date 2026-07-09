@@ -22,6 +22,7 @@ import (
 
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -164,6 +165,16 @@ func (m *StrictContextMock) ToolConfirmation() *toolconfirmation.ToolConfirmatio
 
 // RequestConfirmation implements [Context].
 func (m *StrictContextMock) RequestConfirmation(hint string, payload any) error {
+	panic("not implemented")
+}
+
+// AuthResponse implements [Context].
+func (m *StrictContextMock) AuthResponse() *authconsent.Response {
+	panic("not implemented")
+}
+
+// RequestCredential implements [Context].
+func (m *StrictContextMock) RequestCredential(req authconsent.Request) error {
 	panic("not implemented")
 }
 

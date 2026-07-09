@@ -21,6 +21,7 @@ import (
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -75,6 +76,72 @@ func generateRequestConfirmationEvent(
 			ThoughtSignature: originalPart.ThoughtSignature,
 		})
 		longRunningToolIDs = append(longRunningToolIDs, requestConfirmationFC.ID)
+	}
+
+	if len(parts) == 0 {
+		return nil
+	}
+
+	ev := session.NewEvent(invocationContext, invocationContext.InvocationID())
+	ev.Author = invocationContext.Agent().Name()
+	ev.Branch = invocationContext.Branch()
+	ev.LLMResponse = model.LLMResponse{
+		Content: &genai.Content{
+			Parts: parts,
+			Role:  genai.RoleModel,
+		},
+	}
+	ev.LongRunningToolIDs = longRunningToolIDs
+	return ev
+}
+
+// generateRequestCredentialEvent creates an Event of adk_request_credential
+// function calls from the interactive OAuth consent requests a tool raised via
+// agent.Context.RequestCredential. It is the credential twin of
+// generateRequestConfirmationEvent: it wraps each original function call and
+// marks the emitted call long-running so the run pauses for user consent.
+func generateRequestCredentialEvent(
+	invocationContext agent.InvocationContext,
+	functionCallEvent *session.Event,
+	functionResponseEvent *session.Event,
+) *session.Event {
+	if functionResponseEvent == nil || len(functionResponseEvent.Actions.RequestedCredentials) == 0 {
+		return nil
+	}
+	if functionCallEvent == nil || functionCallEvent.Content == nil {
+		return nil
+	}
+
+	parts := []*genai.Part{}
+	longRunningToolIDs := []string{}
+
+	// Iterate Content.Parts (ordered) rather than the RequestedCredentials map
+	// so the emitted order is deterministic, matching generateRequestConfirmationEvent.
+	for _, originalPart := range functionCallEvent.Content.Parts {
+		if originalPart.FunctionCall == nil {
+			continue
+		}
+		req, ok := functionResponseEvent.Actions.RequestedCredentials[originalPart.FunctionCall.ID]
+		if !ok {
+			continue
+		}
+
+		args := map[string]any{
+			"originalFunctionCall": originalPart.FunctionCall,
+			"consentRequest":       req,
+		}
+
+		requestCredentialFC := &genai.FunctionCall{
+			ID:   utils.GenerateFunctionCallID(invocationContext),
+			Name: authconsent.FunctionCallName,
+			Args: args,
+		}
+
+		parts = append(parts, &genai.Part{
+			FunctionCall:     requestCredentialFC,
+			ThoughtSignature: originalPart.ThoughtSignature,
+		})
+		longRunningToolIDs = append(longRunningToolIDs, requestCredentialFC.ID)
 	}
 
 	if len(parts) == 0 {

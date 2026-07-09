@@ -234,6 +234,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			StateDelta:                 maps.Clone(event.Actions.StateDelta),
 			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
 			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
+			RequestedCredentials:       maps.Clone(event.Actions.RequestedCredentials),
 			TransferToAgent:            event.Actions.TransferToAgent,
 			Escalate:                   event.Actions.Escalate,
 			SkipSummarization:          event.Actions.SkipSummarization,
