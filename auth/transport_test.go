@@ -17,7 +17,10 @@ package auth_test
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"slices"
+	"strings"
 	"testing"
 
 	"google.golang.org/adk/v2/auth"
@@ -104,5 +107,139 @@ func TestTransportNilProvider(t *testing.T) {
 	tr := &auth.Transport{Base: &captureRT{}}
 	if _, err := tr.RoundTrip(newRequest(t)); err == nil {
 		t.Fatal("RoundTrip() = nil error, want error for nil Provider")
+	}
+}
+
+// sequenceRT returns the given status codes in order (200 once exhausted) and
+// records the Authorization header and body of each request it receives.
+type sequenceRT struct {
+	statuses []int
+	calls    int
+	auths    []string
+	bodies   []string
+}
+
+func (s *sequenceRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.auths = append(s.auths, req.Header.Get("Authorization"))
+	body := ""
+	if req.Body != nil {
+		b, _ := io.ReadAll(req.Body)
+		body = string(b)
+	}
+	s.bodies = append(s.bodies, body)
+
+	code := http.StatusOK
+	if s.calls < len(s.statuses) {
+		code = s.statuses[s.calls]
+	}
+	s.calls++
+	return &http.Response{StatusCode: code, Body: http.NoBody, Header: http.Header{}}, nil
+}
+
+// refreshProvider is a RefreshingProvider that yields cred first and fresh after
+// Refresh is called.
+type refreshProvider struct {
+	cred      *auth.Credential
+	fresh     *auth.Credential
+	refreshes int
+}
+
+func (p *refreshProvider) Credential(context.Context) (*auth.Credential, error) { return p.cred, nil }
+
+func (p *refreshProvider) Refresh(context.Context) (*auth.Credential, error) {
+	p.refreshes++
+	return p.fresh, nil
+}
+
+func TestTransportRefreshesAndRetriesOn401(t *testing.T) {
+	base := &sequenceRT{statuses: []int{http.StatusUnauthorized, http.StatusOK}}
+	p := &refreshProvider{
+		cred:  &auth.Credential{HTTP: &auth.HTTPCredential{Scheme: "bearer", Token: "stale"}},
+		fresh: &auth.Credential{HTTP: &auth.HTTPCredential{Scheme: "bearer", Token: "fresh"}},
+	}
+	tr := &auth.Transport{Provider: p, Base: base}
+
+	resp, err := tr.RoundTrip(newRequest(t))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 after refresh+retry", resp.StatusCode)
+	}
+	if base.calls != 2 {
+		t.Errorf("base calls = %d, want 2", base.calls)
+	}
+	if p.refreshes != 1 {
+		t.Errorf("refreshes = %d, want 1", p.refreshes)
+	}
+	if want := []string{"Bearer stale", "Bearer fresh"}; !slices.Equal(base.auths, want) {
+		t.Errorf("auth headers = %v, want %v", base.auths, want)
+	}
+}
+
+func TestTransportRetryReplaysBody(t *testing.T) {
+	base := &sequenceRT{statuses: []int{http.StatusForbidden, http.StatusOK}}
+	p := &refreshProvider{
+		cred:  &auth.Credential{HTTP: &auth.HTTPCredential{Token: "stale"}},
+		fresh: &auth.Credential{HTTP: &auth.HTTPCredential{Token: "fresh"}},
+	}
+	tr := &auth.Transport{Provider: p, Base: base}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.test/", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	if _, err := tr.RoundTrip(req); err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	if base.calls != 2 {
+		t.Fatalf("base calls = %d, want 2", base.calls)
+	}
+	for i, b := range base.bodies {
+		if b != "payload" {
+			t.Errorf("call %d body = %q, want %q (body must be replayed)", i, b, "payload")
+		}
+	}
+}
+
+func TestTransportNoRefreshWithoutRefreshingProvider(t *testing.T) {
+	base := &sequenceRT{statuses: []int{http.StatusUnauthorized}}
+	tr := &auth.Transport{Provider: auth.StaticToken("x"), Base: base}
+
+	resp, err := tr.RoundTrip(newRequest(t))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (a non-refreshing provider is not retried)", resp.StatusCode)
+	}
+	if base.calls != 1 {
+		t.Errorf("base calls = %d, want 1", base.calls)
+	}
+}
+
+func TestTransportNoRetryNonReplayableBody(t *testing.T) {
+	base := &sequenceRT{statuses: []int{http.StatusUnauthorized, http.StatusOK}}
+	p := &refreshProvider{
+		cred:  &auth.Credential{HTTP: &auth.HTTPCredential{Token: "stale"}},
+		fresh: &auth.Credential{HTTP: &auth.HTTPCredential{Token: "fresh"}},
+	}
+	tr := &auth.Transport{Provider: p, Base: base}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.test/", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	req.GetBody = nil // body cannot be replayed
+
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (non-replayable body is not retried)", resp.StatusCode)
+	}
+	if base.calls != 1 || p.refreshes != 0 {
+		t.Errorf("base calls = %d, refreshes = %d; want 1 and 0", base.calls, p.refreshes)
 	}
 }

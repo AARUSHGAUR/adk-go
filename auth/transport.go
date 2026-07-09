@@ -16,6 +16,7 @@ package auth
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -27,6 +28,10 @@ import (
 // into the call. The resolver runs on every request so that per-user
 // credentials are never shared across users; refresh and caching are handled by
 // the provider's underlying token source.
+//
+// If the response is an auth rejection (401/403) and the provider implements
+// [RefreshingProvider], Transport refreshes the credential and retries the
+// request once — provided the request body can be replayed.
 type Transport struct {
 	// Provider resolves the credential to apply. Required.
 	Provider CredentialProvider
@@ -48,13 +53,66 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auth: resolve credential: %w", err)
 	}
+	resp, err := applyAndSend(base, req, req.Body, cred)
+	if err != nil {
+		return resp, err
+	}
 
-	// Clone before mutating: RoundTrip must not modify the caller's request.
-	req = req.Clone(req.Context())
-	if err := cred.Apply(req.Header); err != nil {
+	// One refresh-and-retry on a downstream auth rejection, when the provider
+	// supports refresh and the request body can be replayed.
+	if !isAuthRejected(resp.StatusCode) {
+		return resp, nil
+	}
+	rp, ok := t.Provider.(RefreshingProvider)
+	if !ok {
+		return resp, nil
+	}
+	body, ok := replayBody(req)
+	if !ok {
+		return resp, nil
+	}
+	fresh, err := rp.Refresh(req.Context())
+	if err != nil {
+		return resp, nil // refresh failed: surface the original rejection
+	}
+	drain(resp)
+	return applyAndSend(base, req, body, fresh)
+}
+
+// applyAndSend sends a clone of req (with the given body) after applying cred,
+// leaving the caller's request untouched.
+func applyAndSend(base http.RoundTripper, req *http.Request, body io.ReadCloser, cred *Credential) (*http.Response, error) {
+	out := req.Clone(req.Context())
+	out.Body = body
+	if err := cred.Apply(out.Header); err != nil {
 		return nil, fmt.Errorf("auth: apply credential: %w", err)
 	}
-	return base.RoundTrip(req)
+	return base.RoundTrip(out)
+}
+
+func isAuthRejected(code int) bool {
+	return code == http.StatusUnauthorized || code == http.StatusForbidden
+}
+
+// replayBody returns a fresh copy of req's body for a retry. It reports false
+// when the body exists but cannot be replayed (no GetBody).
+func replayBody(req *http.Request) (io.ReadCloser, bool) {
+	if req.Body == nil || req.Body == http.NoBody {
+		return http.NoBody, true
+	}
+	if req.GetBody == nil {
+		return nil, false
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil, false
+	}
+	return body, true
+}
+
+func drain(resp *http.Response) {
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
 }
 
 var _ http.RoundTripper = (*Transport)(nil)

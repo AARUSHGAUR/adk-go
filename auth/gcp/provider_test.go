@@ -17,12 +17,15 @@ package gcp_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 
+	"google.golang.org/adk/v2/auth"
 	"google.golang.org/adk/v2/auth/gcp"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/session"
@@ -127,5 +130,72 @@ func TestProviderCachesCredential(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("service calls = %d, want 1 (second resolve should hit the cache)", got)
+	}
+}
+
+func TestProviderRefreshForcesNewToken(t *testing.T) {
+	var mu sync.Mutex
+	var lastForceRefreshToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ForceRefreshToken string `json:"forceRefreshToken"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		lastForceRefreshToken = body.ForceRefreshToken
+		mu.Unlock()
+		tok := "tok1"
+		if body.ForceRefreshToken != "" {
+			tok = "tok2" // a forced refresh mints a new token
+		}
+		_, _ = io.WriteString(w, fmt.Sprintf(`{"success":{"token":%q,"header":"Authorization: Bearer"}}`, tok))
+	}))
+	defer srv.Close()
+
+	client, err := gcp.NewClient(context.Background(),
+		gcp.WithHTTPClient(srv.Client()),
+		gcp.WithAgentIdentityEndpoint(srv.URL),
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	p, err := gcp.NewProvider(gcp.Scheme{Name: "projects/p/locations/l/authProviders/ap"}, gcp.WithClient(client))
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	rp, ok := p.(auth.RefreshingProvider)
+	if !ok {
+		t.Fatal("gcp provider does not implement auth.RefreshingProvider")
+	}
+
+	ctx := adkContext(t, "user-1")
+
+	// Prime the cache with the initial token.
+	if cred, err := p.Credential(ctx); err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	} else if cred.HTTP == nil || cred.HTTP.Token != "tok1" {
+		t.Fatalf("initial credential = %+v, want tok1", cred)
+	}
+
+	// Refresh sends the prior token and returns a new one.
+	cred, err := rp.Refresh(ctx)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	mu.Lock()
+	got := lastForceRefreshToken
+	mu.Unlock()
+	if got != "tok1" {
+		t.Errorf("forceRefreshToken = %q, want %q (the prior token)", got, "tok1")
+	}
+	if cred.HTTP == nil || cred.HTTP.Token != "tok2" {
+		t.Errorf("refreshed credential = %+v, want tok2", cred)
+	}
+
+	// The refreshed credential replaces the cached one.
+	if cred, err := p.Credential(ctx); err != nil {
+		t.Fatalf("Credential() after refresh error = %v", err)
+	} else if cred.HTTP == nil || cred.HTTP.Token != "tok2" {
+		t.Errorf("cached credential after refresh = %+v, want tok2", cred)
 	}
 }
