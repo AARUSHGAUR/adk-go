@@ -23,11 +23,38 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
+
+// FromContext returns the ADK [ReadonlyContext] carried by ctx, if present.
+//
+// ADK contexts embed context.Context and register a read-only view of themselves
+// under a private key, so code that only holds a context.Context — for example an
+// http.RoundTripper running deep beneath a tool call, past intermediaries that
+// wrap the context — can recover the invocation's identity (UserID, AppName,
+// SessionID) without threading a typed context through every layer.
+//
+// It returns (nil, false) for a context that does not descend from an ADK
+// context (a non-agent caller).
+func FromContext(ctx context.Context) (ReadonlyContext, bool) {
+	rc, ok := ctx.Value(adkcontext.SelfKey).(ReadonlyContext)
+	return rc, ok
+}
+
+// RequireContext is like [FromContext] but returns an error instead of a boolean
+// when ctx does not descend from an ADK context. It is a convenience for callers
+// (for example credential providers) that require the invocation identity.
+func RequireContext(ctx context.Context) (ReadonlyContext, error) {
+	rc, ok := FromContext(ctx)
+	if !ok {
+		return nil, fmt.Errorf("agent: context does not belong to an ADK invocation")
+	}
+	return rc, nil
+}
 
 // In general CommonContext should not be wrapped with contexts not providing agent.Context.
 // It allows to copy&modify context instead of building chains.
@@ -342,6 +369,16 @@ func (c *commonContext) SessionID() string {
 
 func (c *commonContext) UserID() string {
 	return c.invocationContext.Session().UserID()
+}
+
+// Value implements context.Context. It returns the commonContext itself for the
+// ADK self key (so [FromContext] can recover it); every other key delegates to
+// the embedded context, preserving existing behavior.
+func (c *commonContext) Value(key any) any {
+	if key == adkcontext.SelfKey {
+		return c
+	}
+	return c.Context.Value(key)
 }
 
 var (
