@@ -45,6 +45,12 @@ type ProviderOption func(*provider)
 // lazily on first use.
 func WithClient(c *Client) ProviderOption { return func(p *provider) { p.client = c } }
 
+// WithStore sets the [auth.CredentialStore] used to cache resolved credentials
+// across requests (keyed by app, user, and resource). When unset, an in-memory
+// store is used. Caching matters here because each miss is a network round-trip
+// (and up to a ~10s pending poll) to the credential service.
+func WithStore(s auth.CredentialStore) ProviderOption { return func(p *provider) { p.store = s } }
+
 // NewProvider returns an [auth.CredentialProvider] that resolves credentials for
 // the given GCP resource via the Agent Identity / IAM Connector services.
 //
@@ -59,11 +65,15 @@ func NewProvider(scheme Scheme, opts ...ProviderOption) (auth.CredentialProvider
 	for _, opt := range opts {
 		opt(p)
 	}
+	if p.store == nil {
+		p.store = auth.NewInMemoryCredentialStore()
+	}
 	return p, nil
 }
 
 type provider struct {
 	scheme Scheme
+	store  auth.CredentialStore
 
 	mu     sync.Mutex
 	client *Client
@@ -82,16 +92,27 @@ func (p *provider) Credential(ctx context.Context) (*auth.Credential, error) {
 		return nil, fmt.Errorf("gcp: ADK context has no user id")
 	}
 
+	key := auth.CredentialKey{AppName: rc.AppName(), UserID: userID, Key: p.scheme.Name}
+	if cred, ok, err := p.store.Get(ctx, key); err == nil && ok {
+		return cred, nil
+	}
+
 	client, err := p.resolveClient()
 	if err != nil {
 		return nil, err
 	}
-	return client.RetrieveCredential(ctx, Request{
+	cred, expiresAt, err := client.retrieve(ctx, Request{
 		Resource:    p.scheme.Name,
 		UserID:      userID,
 		Scopes:      p.scheme.Scopes,
 		ContinueURI: p.scheme.ContinueURI,
 	})
+	if err != nil {
+		return nil, err
+	}
+	// Best-effort cache: a store write failure must not fail auth.
+	_ = p.store.Set(ctx, key, cred, expiresAt)
+	return cred, nil
 }
 
 // resolveClient returns the configured client, creating a default one (backed by

@@ -30,8 +30,9 @@ type agentIdentityRequest struct {
 // agentIdentityResponse mirrors the RetrieveCredentialsResponse "result" oneof.
 type agentIdentityResponse struct {
 	Success *struct {
-		Token  string `json:"token"`
-		Header string `json:"header"`
+		Token      string `json:"token"`
+		Header     string `json:"header"`
+		ExpireTime string `json:"expireTime"`
 	} `json:"success"`
 	Pending            *struct{}      `json:"pending"`
 	UriConsentRequired *consentDetail `json:"uriConsentRequired"`
@@ -57,7 +58,12 @@ func (c *Client) retrieveAgentIdentity(ctx context.Context, req Request) (retrie
 
 	switch {
 	case out.Success != nil:
-		return retrieveResult{status: statusOK, token: out.Success.Token, header: out.Success.Header}, nil
+		return retrieveResult{
+			status:    statusOK,
+			token:     out.Success.Token,
+			header:    out.Success.Header,
+			expiresAt: parseExpireTime(out.Success.ExpireTime),
+		}, nil
 	case out.UriConsentRequired != nil:
 		return retrieveResult{
 			status:       statusConsentRequired,

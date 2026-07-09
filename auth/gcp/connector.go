@@ -35,8 +35,9 @@ type connectorRequest struct {
 type connectorOperation struct {
 	Done     bool `json:"done"`
 	Response *struct {
-		Token  string `json:"token"`
-		Header string `json:"header"`
+		Token      string `json:"token"`
+		Header     string `json:"header"`
+		ExpireTime string `json:"expireTime"`
 	} `json:"response"`
 	Metadata *struct {
 		ConsentPending     *struct{}      `json:"consentPending"`
@@ -63,7 +64,12 @@ func (c *Client) retrieveConnector(ctx context.Context, req Request) (retrieveRe
 		return retrieveResult{}, fmt.Errorf("gcp: connector operation failed: %s", op.Error.Message)
 	}
 	if op.Done && op.Response != nil {
-		return retrieveResult{status: statusOK, token: op.Response.Token, header: op.Response.Header}, nil
+		return retrieveResult{
+			status:    statusOK,
+			token:     op.Response.Token,
+			header:    op.Response.Header,
+			expiresAt: parseExpireTime(op.Response.ExpireTime),
+		}, nil
 	}
 	if md := op.Metadata; md != nil {
 		switch {

@@ -117,11 +117,18 @@ type Request struct {
 // reports a non-interactive pending state (up to the configured poll timeout).
 // If interactive consent is required it returns an [auth.ConsentRequiredError].
 func (c *Client) RetrieveCredential(ctx context.Context, req Request) (*auth.Credential, error) {
+	cred, _, err := c.retrieve(ctx, req)
+	return cred, err
+}
+
+// retrieve is RetrieveCredential plus the credential's expiry (zero when the
+// service does not report one), which callers use to cache the result.
+func (c *Client) retrieve(ctx context.Context, req Request) (*auth.Credential, time.Time, error) {
 	if req.Resource == "" {
-		return nil, fmt.Errorf("gcp: RetrieveCredential requires a Resource")
+		return nil, time.Time{}, fmt.Errorf("gcp: RetrieveCredential requires a Resource")
 	}
 	if req.UserID == "" {
-		return nil, fmt.Errorf("gcp: RetrieveCredential requires a UserID")
+		return nil, time.Time{}, fmt.Errorf("gcp: RetrieveCredential requires a UserID")
 	}
 
 	retrieve := c.retrieveAgentIdentity
@@ -134,24 +141,28 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (*auth.Cre
 	for {
 		res, err := retrieve(ctx, req)
 		if err != nil {
-			return nil, err
+			return nil, time.Time{}, err
 		}
 		switch res.status {
 		case statusOK:
-			return mapCredential(res.header, res.token)
+			cred, err := mapCredential(res.header, res.token)
+			if err != nil {
+				return nil, time.Time{}, err
+			}
+			return cred, res.expiresAt, nil
 		case statusConsentRequired:
-			return nil, &auth.ConsentRequiredError{AuthURI: res.consentURI, Nonce: res.consentNonce}
+			return nil, time.Time{}, &auth.ConsentRequiredError{AuthURI: res.consentURI, Nonce: res.consentNonce}
 		case statusRejected:
-			return nil, fmt.Errorf("gcp: user consent rejected for %q", req.Resource)
+			return nil, time.Time{}, fmt.Errorf("gcp: user consent rejected for %q", req.Resource)
 		case statusPending:
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				return nil, fmt.Errorf("gcp: timed out waiting for credentials for %q", req.Resource)
+				return nil, time.Time{}, fmt.Errorf("gcp: timed out waiting for credentials for %q", req.Resource)
 			}
 			wait := min(backoff, remaining)
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, time.Time{}, ctx.Err()
 			case <-time.After(wait):
 			}
 			backoff = min(backoff*2, maxBackoff)
@@ -173,8 +184,22 @@ type retrieveResult struct {
 	status       retrieveStatus
 	token        string
 	header       string
+	expiresAt    time.Time
 	consentURI   string
 	consentNonce string
+}
+
+// parseExpireTime parses a proto Timestamp (RFC 3339) into a time.Time, or
+// returns the zero time when empty or malformed.
+func parseExpireTime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // mapCredential maps the service's {header, token} tuple to an [auth.Credential]:
