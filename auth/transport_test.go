@@ -86,14 +86,14 @@ func TestTransportProviderError(t *testing.T) {
 func TestTransportConsentRequiredPropagates(t *testing.T) {
 	base := &captureRT{}
 	p := auth.ProviderFunc(func(context.Context) (*auth.Credential, error) {
-		return nil, &auth.ErrConsentRequired{AuthURI: "https://consent.example", Key: "k"}
+		return nil, &auth.ConsentRequiredError{AuthURI: "https://consent.example", Key: "k"}
 	})
 	tr := &auth.Transport{Provider: p, Base: base}
 
 	_, err := tr.RoundTrip(newRequest(t))
-	var consent *auth.ErrConsentRequired
+	var consent *auth.ConsentRequiredError
 	if !errors.As(err, &consent) {
-		t.Fatalf("RoundTrip() error = %v, want *auth.ErrConsentRequired", err)
+		t.Fatalf("RoundTrip() error = %v, want *auth.ConsentRequiredError", err)
 	}
 	if base.called {
 		t.Error("base transport must not be called when consent is required")

@@ -111,6 +111,10 @@ func (c *HTTPCredential) apply(h http.Header) error {
 		}
 		h.Set("Authorization", "Bearer "+c.Token)
 	case "basic":
+		// RFC 7617 allows an empty username or password alone; reject only ":".
+		if c.Username == "" && c.Password == "" {
+			return fmt.Errorf("auth: basic credential missing username and password")
+		}
 		raw := base64.StdEncoding.EncodeToString([]byte(c.Username + ":" + c.Password))
 		h.Set("Authorization", "Basic "+raw)
 	default:

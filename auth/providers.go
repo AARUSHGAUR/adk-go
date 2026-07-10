@@ -37,7 +37,7 @@ type CredentialProvider interface {
 	// so identity rides on the one ADK context rather than an auth-specific key.
 	//
 	// When interactive (3-legged) consent is required and cannot be completed
-	// non-interactively, Credential returns an *ErrConsentRequired carrying the
+	// non-interactively, Credential returns a *ConsentRequiredError carrying the
 	// authorization URI; the tool layer turns that into a human-in-the-loop
 	// consent round-trip. Non-interactive providers never return it.
 	Credential(ctx context.Context) (*Credential, error)
@@ -51,9 +51,9 @@ func (f ProviderFunc) Credential(ctx context.Context) (*Credential, error) {
 	return f(ctx)
 }
 
-// ErrConsentRequired signals that interactive, 3-legged OAuth consent is needed
+// ConsentRequiredError signals that interactive, 3-legged OAuth consent is needed
 // before a credential can be issued. Consumers detect it with errors.As.
-type ErrConsentRequired struct {
+type ConsentRequiredError struct {
 	// AuthURI is the URL the end user must visit to grant consent.
 	AuthURI string
 	// Nonce is an opaque value echoed back to correlate the consent response.
@@ -63,7 +63,7 @@ type ErrConsentRequired struct {
 }
 
 // Error implements error.
-func (e *ErrConsentRequired) Error() string {
+func (e *ConsentRequiredError) Error() string {
 	return fmt.Sprintf("auth: interactive consent required (auth_uri=%q)", e.AuthURI)
 }
 
@@ -94,16 +94,26 @@ func TokenSourceProvider(ts oauth2.TokenSource) CredentialProvider {
 	})
 }
 
-// ADC returns a provider backed by Google Application Default Credentials for
-// the given OAuth scopes. Credentials are discovered lazily on first use and
-// reused thereafter (the underlying source refreshes tokens itself).
+// scopeCloudPlatform is the default ADC scope, matching adk-python and gcloud.
+const scopeCloudPlatform = "https://www.googleapis.com/auth/cloud-platform"
+
+func adcTokenSource(ctx context.Context, scopes []string) (oauth2.TokenSource, error) {
+	if len(scopes) == 0 {
+		scopes = []string{scopeCloudPlatform}
+	}
+	creds, err := google.FindDefaultCredentials(ctx, scopes...)
+	if err != nil {
+		return nil, fmt.Errorf("auth: find default credentials: %w", err)
+	}
+	return creds.TokenSource, nil
+}
+
+// ADC returns a provider backed by Google Application Default Credentials.
+// Credentials are discovered lazily on first use and reused thereafter; with no
+// scopes the cloud-platform scope is used.
 func ADC(scopes ...string) CredentialProvider {
 	return lazyTokenSource(func(ctx context.Context) (oauth2.TokenSource, error) {
-		creds, err := google.FindDefaultCredentials(ctx, scopes...)
-		if err != nil {
-			return nil, fmt.Errorf("auth: find default credentials: %w", err)
-		}
-		return creds.TokenSource, nil
+		return adcTokenSource(ctx, scopes)
 	})
 }
 
@@ -115,6 +125,8 @@ type ServiceAccountConfig struct {
 	// Default Credentials are used instead.
 	JSONKey []byte
 	// Scopes requested for an OAuth2 access token. Ignored when Audience is set.
+	// Required with an explicit JSONKey; when falling back to ADC (JSONKey
+	// empty), empty Scopes default to the cloud-platform scope.
 	Scopes []string
 	// Audience, when non-empty, requests a Google-signed ID token for that
 	// audience (for example a Cloud Run or IAP URL) instead of an access token.
@@ -138,26 +150,25 @@ func ServiceAccount(cfg ServiceAccountConfig) CredentialProvider {
 			return ts, nil
 		}
 		if len(cfg.JSONKey) > 0 {
+			// Parity with adk-python: an explicit-key access token requires scopes.
+			if len(cfg.Scopes) == 0 {
+				return nil, fmt.Errorf("auth: scopes are required for a service-account access token")
+			}
 			creds, err := google.CredentialsFromJSONWithType(ctx, cfg.JSONKey, google.ServiceAccount, cfg.Scopes...)
 			if err != nil {
 				return nil, fmt.Errorf("auth: credentials from json: %w", err)
 			}
 			return creds.TokenSource, nil
 		}
-		creds, err := google.FindDefaultCredentials(ctx, cfg.Scopes...)
-		if err != nil {
-			return nil, fmt.Errorf("auth: find default credentials: %w", err)
-		}
-		return creds.TokenSource, nil
+		return adcTokenSource(ctx, cfg.Scopes)
 	})
 }
 
 // lazyTokenSource builds a provider whose [oauth2.TokenSource] is initialized
-// once, on first use, and reused on success. A failed initialization is not
-// memoized, so a later call may retry. init gets the caller's context with
-// cancellation removed ([context.WithoutCancel]): the memoized source is
-// long-lived and must not be cancelled with a single request, yet must still
-// carry the caller's values (trace, security params).
+// once on first use and reused on success; a failed init is not memoized, so a
+// later call may retry. init receives the caller's context with cancellation
+// removed ([context.WithoutCancel]) so the long-lived source is not tied to one
+// request while still carrying its values.
 func lazyTokenSource(init func(context.Context) (oauth2.TokenSource, error)) CredentialProvider {
 	var (
 		mu sync.Mutex

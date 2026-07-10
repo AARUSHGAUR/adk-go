@@ -17,6 +17,8 @@ package auth
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"golang.org/x/oauth2"
@@ -62,5 +64,38 @@ func TestLazyTokenSourceRetriesFailure(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("init called %d times, want 2", calls)
+	}
+}
+
+// TestLazyTokenSourceSingleFlight: concurrent callers must trigger init once.
+func TestLazyTokenSourceSingleFlight(t *testing.T) {
+	var calls atomic.Int64
+	release := make(chan struct{})
+	p := lazyTokenSource(func(context.Context) (oauth2.TokenSource, error) {
+		calls.Add(1)
+		<-release // block in init so callers pile up on the lock
+		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "tok"}), nil
+	})
+
+	const n = 50
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = p.Credential(t.Context())
+		}()
+	}
+	close(release)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: Credential() error = %v", i, err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("init called %d times, want 1 (single-flight)", got)
 	}
 }

@@ -75,9 +75,21 @@ func TestTokenSourceProviderNil(t *testing.T) {
 }
 
 func TestServiceAccountInvalidKey(t *testing.T) {
-	p := auth.ServiceAccount(auth.ServiceAccountConfig{JSONKey: []byte("not-json")})
+	// Scopes are set so the invalid-key path (not the scopes gate) is exercised.
+	p := auth.ServiceAccount(auth.ServiceAccountConfig{
+		JSONKey: []byte("not-json"),
+		Scopes:  []string{"https://www.googleapis.com/auth/cloud-platform"},
+	})
 	if _, err := p.Credential(t.Context()); err == nil {
 		t.Fatal("Credential() = nil error, want error for invalid service-account key")
+	}
+}
+
+func TestServiceAccountAccessTokenRequiresScopes(t *testing.T) {
+	// Explicit key + no scopes must error (parity with adk-python), before any I/O.
+	p := auth.ServiceAccount(auth.ServiceAccountConfig{JSONKey: []byte("{}")})
+	if _, err := p.Credential(t.Context()); err == nil {
+		t.Fatal("Credential() = nil error, want error for missing scopes")
 	}
 }
 
@@ -103,10 +115,10 @@ func TestProviderFunc(t *testing.T) {
 	}
 }
 
-func TestErrConsentRequired(t *testing.T) {
-	err := error(&auth.ErrConsentRequired{AuthURI: "https://consent.example", Nonce: "n", Key: "k"})
+func TestConsentRequiredError(t *testing.T) {
+	err := error(&auth.ConsentRequiredError{AuthURI: "https://consent.example", Nonce: "n", Key: "k"})
 
-	var consent *auth.ErrConsentRequired
+	var consent *auth.ConsentRequiredError
 	if !errors.As(err, &consent) {
 		t.Fatalf("errors.As failed for %v", err)
 	}
