@@ -36,12 +36,24 @@ type Transport struct {
 
 // RoundTrip implements [http.RoundTripper].
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Per the RoundTripper contract, req.Body must be closed on every path. On
+	// success the base RoundTripper owns it; guard the early returns. Mirrors
+	// golang.org/x/oauth2.Transport.
+	reqBodyClosed := false
+	if req.Body != nil {
+		defer func() {
+			if !reqBodyClosed {
+				_ = req.Body.Close()
+			}
+		}()
+	}
+
+	if t.Provider == nil {
+		return nil, fmt.Errorf("auth: Transport has no Provider")
+	}
 	base := t.Base
 	if base == nil {
 		base = http.DefaultTransport
-	}
-	if t.Provider == nil {
-		return nil, fmt.Errorf("auth: Transport has no Provider")
 	}
 
 	cred, err := t.Provider.Credential(req.Context())
@@ -50,11 +62,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	// Clone before mutating: RoundTrip must not modify the caller's request.
-	req = req.Clone(req.Context())
-	if err := cred.Apply(req.Header); err != nil {
+	req2 := req.Clone(req.Context())
+	if err := cred.Apply(req2.Header); err != nil {
 		return nil, fmt.Errorf("auth: apply credential: %w", err)
 	}
-	return base.RoundTrip(req)
+
+	reqBodyClosed = true // base RoundTripper now owns closing the body.
+	return base.RoundTrip(req2)
 }
 
 var _ http.RoundTripper = (*Transport)(nil)

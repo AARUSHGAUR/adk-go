@@ -17,33 +17,12 @@ package auth_test
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"testing"
 
 	"google.golang.org/adk/v2/auth"
 )
-
-// captureRT is a stub http.RoundTripper that records the Authorization header
-// it received and whether it was invoked.
-type captureRT struct {
-	called  bool
-	gotAuth string
-}
-
-func (c *captureRT) RoundTrip(req *http.Request) (*http.Response, error) {
-	c.called = true
-	c.gotAuth = req.Header.Get("Authorization")
-	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: http.Header{}}, nil
-}
-
-func newRequest(t *testing.T) *http.Request {
-	t.Helper()
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://example.test/", nil)
-	if err != nil {
-		t.Fatalf("NewRequestWithContext() error = %v", err)
-	}
-	return req
-}
 
 func TestTransportAppliesCredential(t *testing.T) {
 	base := &captureRT{}
@@ -106,3 +85,50 @@ func TestTransportNilProvider(t *testing.T) {
 		t.Fatal("RoundTrip() = nil error, want error for nil Provider")
 	}
 }
+
+func TestTransportClosesBodyOnError(t *testing.T) {
+	body := &closeTrackingBody{}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://example.test/", body)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	tr := &auth.Transport{Provider: auth.ProviderFunc(func(context.Context) (*auth.Credential, error) {
+		return nil, errors.New("boom")
+	})}
+
+	if _, err := tr.RoundTrip(req); err == nil {
+		t.Fatal("RoundTrip() = nil error, want error")
+	}
+	if !body.closed {
+		t.Error("RoundTrip must close req.Body when it returns an error")
+	}
+}
+
+// captureRT is a stub http.RoundTripper that records the Authorization header
+// it received and whether it was invoked.
+type captureRT struct {
+	called  bool
+	gotAuth string
+}
+
+func (c *captureRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.called = true
+	c.gotAuth = req.Header.Get("Authorization")
+	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: http.Header{}}, nil
+}
+
+// newRequest builds a GET request bound to the test context.
+func newRequest(t *testing.T) *http.Request {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://example.test/", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	return req
+}
+
+// closeTrackingBody is an io.ReadCloser that records whether Close was called.
+type closeTrackingBody struct{ closed bool }
+
+func (b *closeTrackingBody) Read([]byte) (int, error) { return 0, io.EOF }
+func (b *closeTrackingBody) Close() error             { b.closed = true; return nil }

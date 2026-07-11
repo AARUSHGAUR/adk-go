@@ -111,14 +111,14 @@ func (c *HTTPCredential) apply(h http.Header) error {
 		}
 		h.Set("Authorization", "Bearer "+c.Token)
 	case "basic":
-		// RFC 7617 allows an empty username or password alone; reject only ":".
+		// An empty username or password alone is allowed; reject only when both are empty.
 		if c.Username == "" && c.Password == "" {
 			return fmt.Errorf("auth: basic credential missing username and password")
 		}
 		raw := base64.StdEncoding.EncodeToString([]byte(c.Username + ":" + c.Password))
 		h.Set("Authorization", "Basic "+raw)
 	default:
-		return fmt.Errorf("auth: unsupported http scheme %q", c.Scheme)
+		return fmt.Errorf("auth: unsupported http scheme %q; want \"bearer\" or \"basic\"", c.Scheme)
 	}
 	for k, v := range c.AdditionalHeaders {
 		h.Set(k, v)

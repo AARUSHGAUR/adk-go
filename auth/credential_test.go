@@ -25,6 +25,13 @@ import (
 	"google.golang.org/adk/v2/auth"
 )
 
+// Compile-time assertions that the built-in marker types satisfy Scheme.
+var (
+	_ auth.Scheme = auth.APIKeyScheme{}
+	_ auth.Scheme = auth.HTTPScheme{}
+	_ auth.Scheme = auth.OAuth2Scheme{}
+)
+
 func TestCredentialApply(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -26,21 +26,6 @@ import (
 	"google.golang.org/adk/v2/auth"
 )
 
-// resolvedAuth resolves the provider and returns the Authorization header its
-// credential produces.
-func resolvedAuth(t *testing.T, p auth.CredentialProvider) string {
-	t.Helper()
-	cred, err := p.Credential(t.Context())
-	if err != nil {
-		t.Fatalf("Credential() error = %v", err)
-	}
-	h := http.Header{}
-	if err := cred.Apply(h); err != nil {
-		t.Fatalf("Apply() error = %v", err)
-	}
-	return h.Get("Authorization")
-}
-
 func TestStaticToken(t *testing.T) {
 	if got := resolvedAuth(t, auth.StaticToken("abc")); got != "Bearer abc" {
 		t.Errorf("Authorization = %q, want %q", got, "Bearer abc")
@@ -128,4 +113,19 @@ func TestConsentRequiredError(t *testing.T) {
 	if !strings.Contains(err.Error(), "consent.example") {
 		t.Errorf("Error() = %q, want it to mention the auth URI", err.Error())
 	}
+}
+
+// resolvedAuth resolves the provider and returns the Authorization header its
+// credential produces.
+func resolvedAuth(t *testing.T, p auth.CredentialProvider) string {
+	t.Helper()
+	cred, err := p.Credential(t.Context())
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	h := http.Header{}
+	if err := cred.Apply(h); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	return h.Get("Authorization")
 }
