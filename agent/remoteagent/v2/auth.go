@@ -66,6 +66,9 @@ func credentialValue(c *auth.Credential) (string, error) {
 			}
 			return tok.AccessToken, nil
 		}
+		if c.OAuth2.AccessToken == "" {
+			return "", fmt.Errorf("remoteagent: oauth2 credential missing access token")
+		}
 		return c.OAuth2.AccessToken, nil
 	case c.HTTP != nil:
 		if c.HTTP.Token == "" {
@@ -73,6 +76,6 @@ func credentialValue(c *auth.Credential) (string, error) {
 		}
 		return c.HTTP.Token, nil
 	default:
-		return "", fmt.Errorf("remoteagent: unsupported credential kind for a2a auth")
+		return "", fmt.Errorf("remoteagent: unsupported credential kind for a2a auth; want APIKey, HTTP bearer, or OAuth2")
 	}
 }

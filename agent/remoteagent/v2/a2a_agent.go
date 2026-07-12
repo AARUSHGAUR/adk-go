@@ -147,7 +147,21 @@ type A2AConfig struct {
 	// outgoing A2A request whose agent card declares a matching security
 	// requirement, scoped to the ADK session. It cannot be combined with a
 	// custom ClientProvider; set one or the other.
+	//
+	// Enable Auth only for remote agents whose card comes from a trusted source.
+	// The card decides both whether a credential is attached and where the
+	// request goes, so a malicious or attacker-influenced card could exfiltrate
+	// the resolved credential to an endpoint it controls.
+	//
+	// Resolution is fail-open: if the provider returns an error, the a2a auth
+	// interceptor logs it and sends the request unauthenticated (which the
+	// remote server will likely reject) rather than failing the call. A
+	// consequence is that only non-interactive credentials work here: a provider
+	// returning *auth.ConsentRequiredError (interactive 3-legged OAuth) can't
+	// drive a consent round-trip — the error is swallowed — so use static tokens,
+	// API keys, or 2-legged / service-account sources.
 	Auth auth.CredentialProvider
+
 	// MessageSendConfig is attached to a2a.SendMessageRequest sent on every agent invocation.
 	MessageSendConfig *a2a.SendMessageConfig
 
