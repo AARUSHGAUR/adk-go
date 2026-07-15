@@ -32,21 +32,11 @@ type Scheme interface {
 	isScheme()
 }
 
-// APIKeyLocation identifies where an API key is carried. Only the request
-// header is supported initially.
-type APIKeyLocation int
-
-const (
-	// APIKeyInHeader carries the API key in a request header.
-	APIKeyInHeader APIKeyLocation = iota
-)
-
 // APIKeyScheme is a header-based API key scheme.
 //
 // Spec: https://swagger.io/docs/specification/v3_0/authentication/api-keys/
 type APIKeyScheme struct {
 	Name string
-	In   APIKeyLocation
 }
 
 // HTTPScheme is an HTTP auth scheme: "bearer" or "basic". The scheme name is
