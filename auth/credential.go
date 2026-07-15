@@ -23,8 +23,7 @@ import (
 )
 
 // Credential is a resolved credential that writes itself onto an outbound HTTP
-// request. The interface is open, so callers may supply kinds beyond this
-// package's built-ins.
+// request.
 type Credential interface {
 	// Apply writes the credential's auth headers onto h.
 	Apply(h http.Header) error
