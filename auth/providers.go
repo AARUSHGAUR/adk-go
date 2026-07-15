@@ -40,14 +40,14 @@ type CredentialProvider interface {
 	// non-interactively, Credential returns a *ConsentRequiredError carrying the
 	// authorization URI; the tool layer turns that into a human-in-the-loop
 	// consent round-trip. Non-interactive providers never return it.
-	Credential(ctx context.Context) (*Credential, error)
+	Credential(ctx context.Context) (Credential, error)
 }
 
 // ProviderFunc adapts an ordinary function to a [CredentialProvider].
-type ProviderFunc func(ctx context.Context) (*Credential, error)
+type ProviderFunc func(ctx context.Context) (Credential, error)
 
 // Credential implements [CredentialProvider].
-func (f ProviderFunc) Credential(ctx context.Context) (*Credential, error) {
+func (f ProviderFunc) Credential(ctx context.Context) (Credential, error) {
 	return f(ctx)
 }
 
@@ -69,16 +69,16 @@ func (e *ConsentRequiredError) Error() string {
 
 // StaticToken returns a provider that always yields the given bearer token.
 func StaticToken(token string) CredentialProvider {
-	return ProviderFunc(func(context.Context) (*Credential, error) {
-		return &Credential{HTTP: &HTTPCredential{Scheme: "bearer", Token: token}}, nil
+	return ProviderFunc(func(context.Context) (Credential, error) {
+		return BearerCredential{Token: token}, nil
 	})
 }
 
 // APIKey returns a provider that yields a header-based API key credential,
 // where name is the header (for example "X-Api-Key").
 func APIKey(name, value string) CredentialProvider {
-	return ProviderFunc(func(context.Context) (*Credential, error) {
-		return &Credential{APIKey: &APIKeyCredential{Name: name, Value: value}}, nil
+	return ProviderFunc(func(context.Context) (Credential, error) {
+		return APIKeyCredential{Name: name, Value: value}, nil
 	})
 }
 
@@ -86,11 +86,11 @@ func APIKey(name, value string) CredentialProvider {
 // carries the source, so a fresh (auto-refreshed) token is minted at apply
 // time. This covers client-credentials / 2-legged OAuth.
 func TokenSourceProvider(ts oauth2.TokenSource) CredentialProvider {
-	return ProviderFunc(func(context.Context) (*Credential, error) {
+	return ProviderFunc(func(context.Context) (Credential, error) {
 		if ts == nil {
 			return nil, fmt.Errorf("auth: nil token source")
 		}
-		return &Credential{OAuth2: &OAuth2Credential{TokenSource: ts}}, nil
+		return OAuth2Credential{TokenSource: ts}, nil
 	})
 }
 
@@ -174,7 +174,7 @@ func lazyTokenSource(init func(context.Context) (oauth2.TokenSource, error)) Cre
 		mu sync.Mutex
 		ts oauth2.TokenSource
 	)
-	return ProviderFunc(func(ctx context.Context) (*Credential, error) {
+	return ProviderFunc(func(ctx context.Context) (Credential, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if ts == nil {
@@ -184,6 +184,6 @@ func lazyTokenSource(init func(context.Context) (oauth2.TokenSource, error)) Cre
 			}
 			ts = got
 		}
-		return &Credential{OAuth2: &OAuth2Credential{TokenSource: ts}}, nil
+		return OAuth2Credential{TokenSource: ts}, nil
 	})
 }

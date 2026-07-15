@@ -48,7 +48,7 @@ func TestTransportAppliesCredential(t *testing.T) {
 func TestTransportProviderError(t *testing.T) {
 	base := &captureRT{}
 	boom := errors.New("boom")
-	p := auth.ProviderFunc(func(context.Context) (*auth.Credential, error) {
+	p := auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
 		return nil, boom
 	})
 	tr := &auth.Transport{Provider: p, Base: base}
@@ -64,7 +64,7 @@ func TestTransportProviderError(t *testing.T) {
 
 func TestTransportConsentRequiredPropagates(t *testing.T) {
 	base := &captureRT{}
-	p := auth.ProviderFunc(func(context.Context) (*auth.Credential, error) {
+	p := auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
 		return nil, &auth.ConsentRequiredError{AuthURI: "https://consent.example", Key: "k"}
 	})
 	tr := &auth.Transport{Provider: p, Base: base}
@@ -92,7 +92,7 @@ func TestTransportClosesBodyOnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequestWithContext() error = %v", err)
 	}
-	tr := &auth.Transport{Provider: auth.ProviderFunc(func(context.Context) (*auth.Credential, error) {
+	tr := &auth.Transport{Provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
 		return nil, errors.New("boom")
 	})}
 

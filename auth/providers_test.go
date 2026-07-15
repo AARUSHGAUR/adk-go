@@ -87,8 +87,8 @@ func TestADCReturnsProvider(t *testing.T) {
 }
 
 func TestProviderFunc(t *testing.T) {
-	want := &auth.Credential{HTTP: &auth.HTTPCredential{Token: "abc"}}
-	var p auth.CredentialProvider = auth.ProviderFunc(func(context.Context) (*auth.Credential, error) {
+	want := auth.BearerCredential{Token: "abc"}
+	var p auth.CredentialProvider = auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
 		return want, nil
 	})
 	got, err := p.Credential(t.Context())

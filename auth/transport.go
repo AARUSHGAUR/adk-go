@@ -60,6 +60,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auth: resolve credential: %w", err)
 	}
+	if cred == nil {
+		return nil, fmt.Errorf("auth: provider returned nil credential")
+	}
 
 	// Clone before mutating: RoundTrip must not modify the caller's request.
 	req2 := req.Clone(req.Context())

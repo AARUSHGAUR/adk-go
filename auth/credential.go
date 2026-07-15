@@ -18,17 +18,16 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"golang.org/x/oauth2"
 )
 
-// Credential is a resolved credential ready to be applied to an outbound HTTP
-// request. Exactly one of its fields is set.
-type Credential struct {
-	APIKey *APIKeyCredential
-	HTTP   *HTTPCredential
-	OAuth2 *OAuth2Credential
+// Credential is a resolved credential that writes itself onto an outbound HTTP
+// request. The interface is open, so callers may supply kinds beyond this
+// package's built-ins.
+type Credential interface {
+	// Apply writes the credential's auth headers onto h.
+	Apply(h http.Header) error
 }
 
 // APIKeyCredential is a header-based API key, e.g. {Name: "X-Api-Key"}.
@@ -37,65 +36,8 @@ type APIKeyCredential struct {
 	Value string
 }
 
-// HTTPCredential is an HTTP "bearer" or "basic" credential, plus any extra
-// headers to attach alongside it.
-type HTTPCredential struct {
-	// Scheme is "bearer" or "basic". Empty is treated as "bearer".
-	Scheme string
-	// Token is the bearer token (Scheme == "bearer").
-	Token string
-	// Username and Password are the basic credentials (Scheme == "basic").
-	Username string
-	Password string
-	// AdditionalHeaders are set verbatim on the request.
-	AdditionalHeaders map[string]string
-}
-
-// OAuth2Credential carries an OAuth2 access token. When TokenSource is set, the
-// access token is minted (and auto-refreshed) at apply time; otherwise the
-// static AccessToken is used. AuthURI and Nonce are populated only while
-// interactive consent is pending, before any token exists.
-type OAuth2Credential struct {
-	AccessToken string
-	TokenSource oauth2.TokenSource
-
-	AuthURI string
-	Nonce   string
-}
-
-// Apply writes the credential's headers onto h. It returns an error if the
-// credential is nil, empty, has more than one kind set, or cannot produce a
-// usable value (for example an OAuth2 credential still awaiting consent).
-func (c *Credential) Apply(h http.Header) error {
-	if c == nil {
-		return fmt.Errorf("auth: nil credential")
-	}
-
-	set := 0
-	if c.APIKey != nil {
-		set++
-	}
-	if c.HTTP != nil {
-		set++
-	}
-	if c.OAuth2 != nil {
-		set++
-	}
-	switch {
-	case set == 0:
-		return fmt.Errorf("auth: empty credential")
-	case set > 1:
-		return fmt.Errorf("auth: credential has multiple kinds set")
-	case c.APIKey != nil:
-		return c.APIKey.apply(h)
-	case c.HTTP != nil:
-		return c.HTTP.apply(h)
-	default:
-		return c.OAuth2.apply(h)
-	}
-}
-
-func (c *APIKeyCredential) apply(h http.Header) error {
+// Apply implements [Credential].
+func (c APIKeyCredential) Apply(h http.Header) error {
 	if c.Name == "" {
 		return fmt.Errorf("auth: api key credential missing header name")
 	}
@@ -103,44 +45,77 @@ func (c *APIKeyCredential) apply(h http.Header) error {
 	return nil
 }
 
-func (c *HTTPCredential) apply(h http.Header) error {
-	switch strings.ToLower(c.Scheme) {
-	case "", "bearer":
-		if c.Token == "" {
-			return fmt.Errorf("auth: bearer credential missing token")
-		}
-		h.Set("Authorization", "Bearer "+c.Token)
-	case "basic":
-		// An empty username or password alone is allowed; reject only when both are empty.
-		if c.Username == "" && c.Password == "" {
-			return fmt.Errorf("auth: basic credential missing username and password")
-		}
-		raw := base64.StdEncoding.EncodeToString([]byte(c.Username + ":" + c.Password))
-		h.Set("Authorization", "Basic "+raw)
-	default:
-		return fmt.Errorf("auth: unsupported http scheme %q; want \"bearer\" or \"basic\"", c.Scheme)
+// BearerCredential is an HTTP bearer token.
+type BearerCredential struct {
+	Token string
+}
+
+// Apply implements [Credential].
+func (c BearerCredential) Apply(h http.Header) error {
+	if c.Token == "" {
+		return fmt.Errorf("auth: bearer credential missing token")
 	}
-	for k, v := range c.AdditionalHeaders {
-		h.Set(k, v)
-	}
+	h.Set("Authorization", "Bearer "+c.Token)
 	return nil
 }
 
-func (c *OAuth2Credential) apply(h http.Header) error {
-	if c.TokenSource != nil {
-		tok, err := c.TokenSource.Token()
-		if err != nil {
-			return fmt.Errorf("auth: mint oauth2 token: %w", err)
-		}
-		h.Set("Authorization", tok.Type()+" "+tok.AccessToken)
-		return nil
+// BasicCredential is an HTTP basic username/password credential.
+type BasicCredential struct {
+	Username string
+	Password string
+}
+
+// Apply implements [Credential].
+func (c BasicCredential) Apply(h http.Header) error {
+	// An empty username or password alone is allowed; reject only when both are empty.
+	if c.Username == "" && c.Password == "" {
+		return fmt.Errorf("auth: basic credential missing username and password")
 	}
-	if c.AccessToken == "" {
-		if c.AuthURI != "" {
-			return fmt.Errorf("auth: oauth2 consent pending, no access token yet")
-		}
-		return fmt.Errorf("auth: oauth2 credential missing access token")
+	raw := base64.StdEncoding.EncodeToString([]byte(c.Username + ":" + c.Password))
+	h.Set("Authorization", "Basic "+raw)
+	return nil
+}
+
+// OAuth2Credential mints a fresh access token from TokenSource on each Apply.
+// For a static token, wrap it in [oauth2.StaticTokenSource].
+type OAuth2Credential struct {
+	TokenSource oauth2.TokenSource
+}
+
+// Apply implements [Credential].
+func (c OAuth2Credential) Apply(h http.Header) error {
+	if c.TokenSource == nil {
+		return fmt.Errorf("auth: oauth2 credential missing token source")
 	}
-	h.Set("Authorization", "Bearer "+c.AccessToken)
+	tok, err := c.TokenSource.Token()
+	if err != nil {
+		return fmt.Errorf("auth: mint oauth2 token: %w", err)
+	}
+	h.Set("Authorization", tok.Type()+" "+tok.AccessToken)
+	return nil
+}
+
+// WithHeaders wraps inner to also set headers verbatim (overriding inner on
+// conflict) — e.g. x-goog-user-project alongside an OAuth2 token.
+func WithHeaders(inner Credential, headers map[string]string) Credential {
+	return withHeaders{inner: inner, headers: headers}
+}
+
+type withHeaders struct {
+	inner   Credential
+	headers map[string]string
+}
+
+// Apply implements [Credential].
+func (c withHeaders) Apply(h http.Header) error {
+	if c.inner == nil {
+		return fmt.Errorf("auth: WithHeaders has nil inner credential")
+	}
+	if err := c.inner.Apply(h); err != nil {
+		return err
+	}
+	for k, v := range c.headers {
+		h.Set(k, v)
+	}
 	return nil
 }

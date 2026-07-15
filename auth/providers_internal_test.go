@@ -36,8 +36,9 @@ func TestLazyTokenSourceMemoizesSuccess(t *testing.T) {
 		if err != nil {
 			t.Fatalf("call %d: Credential() error = %v", i, err)
 		}
-		if cred.OAuth2 == nil || cred.OAuth2.TokenSource == nil {
-			t.Fatalf("call %d: missing token source", i)
+		oc, ok := cred.(OAuth2Credential)
+		if !ok || oc.TokenSource == nil {
+			t.Fatalf("call %d: got %T, want OAuth2Credential with a token source", i, cred)
 		}
 	}
 	if calls != 1 {

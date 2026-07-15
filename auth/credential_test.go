@@ -25,103 +25,81 @@ import (
 	"google.golang.org/adk/v2/auth"
 )
 
-// Compile-time assertions that the built-in marker types satisfy Scheme.
+// Compile-time assertions for the marker Schemes and the built-in Credentials.
 var (
 	_ auth.Scheme = auth.APIKeyScheme{}
 	_ auth.Scheme = auth.HTTPScheme{}
 	_ auth.Scheme = auth.OAuth2Scheme{}
+
+	_ auth.Credential = auth.APIKeyCredential{}
+	_ auth.Credential = auth.BearerCredential{}
+	_ auth.Credential = auth.BasicCredential{}
+	_ auth.Credential = auth.OAuth2Credential{}
 )
 
 func TestCredentialApply(t *testing.T) {
 	tests := []struct {
 		name    string
-		cred    *auth.Credential
+		cred    auth.Credential
 		want    http.Header
 		wantErr bool
 	}{
 		{
 			name: "api key",
-			cred: &auth.Credential{APIKey: &auth.APIKeyCredential{Name: "X-Api-Key", Value: "secret"}},
+			cred: auth.APIKeyCredential{Name: "X-Api-Key", Value: "secret"},
 			want: http.Header{"X-Api-Key": {"secret"}},
 		},
 		{
 			name: "bearer",
-			cred: &auth.Credential{HTTP: &auth.HTTPCredential{Scheme: "bearer", Token: "abc"}},
-			want: http.Header{"Authorization": {"Bearer abc"}},
-		},
-		{
-			name: "empty scheme defaults to bearer",
-			cred: &auth.Credential{HTTP: &auth.HTTPCredential{Token: "abc"}},
+			cred: auth.BearerCredential{Token: "abc"},
 			want: http.Header{"Authorization": {"Bearer abc"}},
 		},
 		{
 			name: "basic",
-			cred: &auth.Credential{HTTP: &auth.HTTPCredential{Scheme: "basic", Username: "u", Password: "p"}},
+			cred: auth.BasicCredential{Username: "u", Password: "p"},
 			// base64("u:p") == "dTpw"
 			want: http.Header{"Authorization": {"Basic dTpw"}},
 		},
 		{
 			name: "bearer with additional headers",
-			cred: &auth.Credential{HTTP: &auth.HTTPCredential{
-				Scheme:            "bearer",
-				Token:             "abc",
-				AdditionalHeaders: map[string]string{"X-Extra": "1"},
-			}},
+			cred: auth.WithHeaders(auth.BearerCredential{Token: "abc"}, map[string]string{"X-Extra": "1"}),
 			want: http.Header{"Authorization": {"Bearer abc"}, "X-Extra": {"1"}},
 		},
 		{
 			name: "oauth2 static access token",
-			cred: &auth.Credential{OAuth2: &auth.OAuth2Credential{AccessToken: "tok"}},
+			cred: auth.OAuth2Credential{TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "tok", TokenType: "Bearer"})},
 			want: http.Header{"Authorization": {"Bearer tok"}},
 		},
 		{
 			name: "oauth2 token source",
-			cred: &auth.Credential{OAuth2: &auth.OAuth2Credential{
+			cred: auth.OAuth2Credential{
 				TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "fresh", TokenType: "Bearer"}),
-			}},
+			},
 			want: http.Header{"Authorization": {"Bearer fresh"}},
 		},
 		{
-			name:    "nil credential",
-			cred:    nil,
-			wantErr: true,
-		},
-		{
-			name:    "empty credential",
-			cred:    &auth.Credential{},
-			wantErr: true,
-		},
-		{
-			name: "multiple kinds set",
-			cred: &auth.Credential{
-				APIKey: &auth.APIKeyCredential{Name: "X", Value: "y"},
-				HTTP:   &auth.HTTPCredential{Token: "z"},
-			},
-			wantErr: true,
-		},
-		{
 			name:    "api key missing name",
-			cred:    &auth.Credential{APIKey: &auth.APIKeyCredential{Value: "y"}},
+			cred:    auth.APIKeyCredential{Value: "y"},
 			wantErr: true,
 		},
 		{
 			name:    "bearer missing token",
-			cred:    &auth.Credential{HTTP: &auth.HTTPCredential{Scheme: "bearer"}},
+			cred:    auth.BearerCredential{},
 			wantErr: true,
 		},
 		{
-			name:    "unsupported http scheme",
-			cred:    &auth.Credential{HTTP: &auth.HTTPCredential{Scheme: "digest", Token: "x"}},
+			name:    "basic missing username and password",
+			cred:    auth.BasicCredential{},
 			wantErr: true,
 		},
 		{
-			name:    "oauth2 consent pending",
-			cred:    &auth.Credential{OAuth2: &auth.OAuth2Credential{AuthURI: "https://consent"}},
+			name:    "oauth2 missing token source",
+			cred:    auth.OAuth2Credential{},
 			wantErr: true,
 		},
 		{
-			name:    "oauth2 missing token",
-			cred:    &auth.Credential{OAuth2: &auth.OAuth2Credential{}},
+			name:    "with headers nil inner",
+			cred:    auth.WithHeaders(nil, map[string]string{"X": "y"}),
 			wantErr: true,
 		},
 	}
@@ -146,7 +124,7 @@ func TestCredentialApply(t *testing.T) {
 }
 
 func TestOAuth2TokenSourceError(t *testing.T) {
-	cred := &auth.Credential{OAuth2: &auth.OAuth2Credential{TokenSource: errTokenSource{}}}
+	cred := auth.OAuth2Credential{TokenSource: errTokenSource{}}
 	if err := cred.Apply(http.Header{}); err == nil {
 		t.Fatal("Apply() = nil error, want error from failing token source")
 	}
