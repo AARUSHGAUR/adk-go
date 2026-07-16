@@ -25,12 +25,8 @@ import (
 	"google.golang.org/adk/v2/auth"
 )
 
-// Compile-time assertions for the marker Schemes and the built-in Credentials.
+// Compile-time assertions that the built-in credentials implement [auth.Credential].
 var (
-	_ auth.Scheme = auth.APIKeyScheme{}
-	_ auth.Scheme = auth.HTTPScheme{}
-	_ auth.Scheme = auth.OAuth2Scheme{}
-
 	_ auth.Credential = auth.APIKeyCredential{}
 	_ auth.Credential = auth.BearerCredential{}
 	_ auth.Credential = auth.BasicCredential{}
