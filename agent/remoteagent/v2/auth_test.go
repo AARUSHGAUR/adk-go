@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"golang.org/x/oauth2"
 
+	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
 	"google.golang.org/adk/v2/session"
 )
@@ -101,51 +103,38 @@ func TestNewA2AAuthWithClientProviderIsError(t *testing.T) {
 }
 
 func TestRemoteAgent_AuthAttachesBearerHeader(t *testing.T) {
-	executor := newA2AEventReplay(t, []a2a.Event{
-		a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")),
-	})
-	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor))
-
 	var mu sync.Mutex
 	var gotAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := serveRecordingA2A(t, func(r *http.Request) {
 		mu.Lock()
 		gotAuth = r.Header.Get("Authorization")
 		mu.Unlock()
-		inner.ServeHTTP(w, r)
-	}))
-	defer srv.Close()
+	}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
 
-	// The interceptor only attaches auth when the card declares a matching
-	// security requirement, so the card must carry one.
-	card := &a2a.AgentCard{
-		Name:                "a2a",
-		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(srv.URL, a2a.TransportProtocolJSONRPC)},
-		Capabilities:        a2a.AgentCapabilities{Streaming: true},
-		SecuritySchemes: a2a.NamedSecuritySchemes{
-			"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"},
-		},
-		SecurityRequirements: a2a.SecurityRequirementsOptions{
-			{a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{}},
-		},
-	}
+	card := bearerCard(srv.URL)
+	provider := func(context.Context) (*a2a.AgentCard, error) { return card, nil }
 
-	// Auth must attach whether the card is static or resolved per-invocation.
+	// Auth must attach whichever way the card is supplied, and on both the
+	// streaming (SendStreamingMessage) and non-streaming (SendMessage) paths.
 	tests := []struct {
-		name string
-		cfg  A2AConfig
+		name      string
+		cfg       A2AConfig
+		streaming agent.StreamingMode
 	}{
 		{
-			name: "static card",
-			cfg:  A2AConfig{Name: "a2a", AgentCard: card, Auth: auth.StaticToken("secret-token")},
+			name:      "static card, streaming",
+			cfg:       A2AConfig{Name: "a2a", AgentCard: card, Auth: auth.StaticToken("secret-token")},
+			streaming: agent.StreamingModeSSE,
 		},
 		{
-			name: "card provider",
-			cfg: A2AConfig{
-				Name:              "a2a",
-				AgentCardProvider: func(context.Context) (*a2a.AgentCard, error) { return card, nil },
-				Auth:              auth.StaticToken("secret-token"),
-			},
+			name:      "card provider, streaming",
+			cfg:       A2AConfig{Name: "a2a", AgentCardProvider: provider, Auth: auth.StaticToken("secret-token")},
+			streaming: agent.StreamingModeSSE,
+		},
+		{
+			name:      "static card, non-streaming",
+			cfg:       A2AConfig{Name: "a2a", AgentCard: card, Auth: auth.StaticToken("secret-token")},
+			streaming: agent.StreamingModeNone,
 		},
 	}
 	for _, tc := range tests {
@@ -159,7 +148,7 @@ func TestRemoteAgent_AuthAttachesBearerHeader(t *testing.T) {
 				t.Fatalf("NewA2A() error = %v", err)
 			}
 
-			ictx := newInvocationContext(t, []*session.Event{newUserHello()})
+			ictx := newInvocationContextWithStreamingMode(t, []*session.Event{newUserHello()}, tc.streaming)
 			if _, err := runAndCollect(ictx, remoteAgent); err != nil {
 				t.Fatalf("agent.Run() error = %v", err)
 			}
@@ -177,39 +166,21 @@ func TestRemoteAgent_AuthAttachesBearerHeader(t *testing.T) {
 // when the provider errors, the a2a interceptor drops auth and the request still
 // goes out (unauthenticated), rather than failing the call.
 func TestRemoteAgent_AuthFailOpenSendsUnauthenticated(t *testing.T) {
-	executor := newA2AEventReplay(t, []a2a.Event{
-		a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")),
-	})
-	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor))
-
 	var mu sync.Mutex
 	var gotAuth string
 	var sawRequest bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := serveRecordingA2A(t, func(r *http.Request) {
 		mu.Lock()
 		gotAuth = r.Header.Get("Authorization")
 		sawRequest = true
 		mu.Unlock()
-		inner.ServeHTTP(w, r)
-	}))
-	defer srv.Close()
+	}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
 
-	card := &a2a.AgentCard{
-		Name:                "a2a",
-		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(srv.URL, a2a.TransportProtocolJSONRPC)},
-		Capabilities:        a2a.AgentCapabilities{Streaming: true},
-		SecuritySchemes: a2a.NamedSecuritySchemes{
-			"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"},
-		},
-		SecurityRequirements: a2a.SecurityRequirementsOptions{
-			{a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{}},
-		},
-	}
 	failing := auth.ProviderFunc(func(context.Context) (*auth.Credential, error) {
 		return nil, errors.New("resolve failed")
 	})
 
-	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: card, Auth: failing})
+	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: bearerCard(srv.URL), Auth: failing})
 	if err != nil {
 		t.Fatalf("NewA2A() error = %v", err)
 	}
@@ -227,4 +198,218 @@ func TestRemoteAgent_AuthFailOpenSendsUnauthenticated(t *testing.T) {
 	if gotAuth != "" {
 		t.Errorf("server saw Authorization = %q, want empty (fail-open, no credential)", gotAuth)
 	}
+}
+
+// TestRemoteAgent_AuthAttachesAPIKeyHeader covers the apiKey scheme end-to-end:
+// the interceptor must place the raw key in the header named by the card's
+// scheme, not in "Authorization" and without a "Bearer " prefix.
+func TestRemoteAgent_AuthAttachesAPIKeyHeader(t *testing.T) {
+	var mu sync.Mutex
+	var gotKey, gotAuth string
+	srv := serveRecordingA2A(t, func(r *http.Request) {
+		mu.Lock()
+		gotKey = r.Header.Get("X-Api-Key")
+		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+	}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
+
+	card := newSecureCard(srv.URL,
+		a2a.NamedSecuritySchemes{
+			"apikey": a2a.APIKeySecurityScheme{Location: a2a.APIKeySecuritySchemeLocationHeader, Name: "X-Api-Key"},
+		},
+		a2a.SecurityRequirementsOptions{
+			{a2a.SecuritySchemeName("apikey"): a2a.SecuritySchemeScopes{}},
+		},
+	)
+
+	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: card, Auth: auth.APIKey("X-Api-Key", "secret")})
+	if err != nil {
+		t.Fatalf("NewA2A() error = %v", err)
+	}
+
+	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
+	if _, err := runAndCollect(ictx, remoteAgent); err != nil {
+		t.Fatalf("agent.Run() error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotKey != "secret" {
+		t.Errorf("server saw X-Api-Key = %q, want %q", gotKey, "secret")
+	}
+	if gotAuth != "" {
+		t.Errorf("server saw Authorization = %q, want empty (apiKey uses its own header)", gotAuth)
+	}
+}
+
+// TestRemoteAgent_AuthAcceptedByEnforcingServer proves the attached credential
+// is usable, not merely present: against a server that rejects the request
+// unless it carries the right bearer token, the correct token is accepted and a
+// wrong one is rejected (surfacing as an error event, per the default converter).
+func TestRemoteAgent_AuthAcceptedByEnforcingServer(t *testing.T) {
+	const goodToken = "good-token"
+	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(newA2AEventReplay(t, []a2a.Event{
+		a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")),
+	})))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+goodToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	tests := []struct {
+		name    string
+		token   string
+		wantErr bool
+	}{
+		{name: "accepted", token: goodToken, wantErr: false},
+		{name: "rejected", token: "bad-token", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: bearerCard(srv.URL), Auth: auth.StaticToken(tc.token)})
+			if err != nil {
+				t.Fatalf("NewA2A() error = %v", err)
+			}
+
+			events, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
+			if err != nil {
+				t.Fatalf("agent.Run() error = %v", err)
+			}
+
+			errEvent := firstErrorEvent(events)
+			if tc.wantErr {
+				if errEvent == nil {
+					t.Fatal("want an error event from the rejected request, got none")
+				}
+				if !strings.Contains(errEvent.ErrorMessage, "401") {
+					t.Errorf("error event = %q, want it to mention 401", errEvent.ErrorMessage)
+				}
+				return
+			}
+			if errEvent != nil {
+				t.Fatalf("unexpected error event: %q", errEvent.ErrorMessage)
+			}
+			if !eventsContainText(events, "ok") {
+				t.Errorf("authenticated response missing the remote agent's reply %q", "ok")
+			}
+		})
+	}
+}
+
+// TestRemoteAgent_AuthScopedPerSession verifies the run loop attaches the ADK
+// session id to each outgoing call, so a session-aware provider (one reading
+// a2aclient.SessionIDFrom) resolves a distinct credential per session.
+func TestRemoteAgent_AuthScopedPerSession(t *testing.T) {
+	var mu sync.Mutex
+	var gotAuth string
+	srv := serveRecordingA2A(t, func(r *http.Request) {
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+	}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
+
+	// Mints a token from the attached session id, proving the id reached the provider.
+	perSession := auth.ProviderFunc(func(ctx context.Context) (*auth.Credential, error) {
+		sid, _ := a2aclient.SessionIDFrom(ctx)
+		return &auth.Credential{HTTP: &auth.HTTPCredential{Token: "tok-" + string(sid)}}, nil
+	})
+
+	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: bearerCard(srv.URL), Auth: perSession})
+	if err != nil {
+		t.Fatalf("NewA2A() error = %v", err)
+	}
+
+	seen := make(map[string]string) // session id -> Authorization header
+	for range 2 {
+		ictx := newInvocationContext(t, []*session.Event{newUserHello()})
+
+		mu.Lock()
+		gotAuth = ""
+		mu.Unlock()
+
+		if _, err := runAndCollect(ictx, remoteAgent); err != nil {
+			t.Fatalf("agent.Run() error = %v", err)
+		}
+
+		mu.Lock()
+		got := gotAuth
+		mu.Unlock()
+
+		sid := ictx.Session().ID()
+		if want := "Bearer tok-" + sid; got != want {
+			t.Errorf("session %s: server saw Authorization = %q, want %q", sid, got, want)
+		}
+		seen[sid] = got
+	}
+	if len(seen) != 2 {
+		t.Fatalf("want 2 distinct sessions, got %d: %v", len(seen), seen)
+	}
+	distinct := make(map[string]bool)
+	for _, v := range seen {
+		distinct[v] = true
+	}
+	if len(distinct) != 2 {
+		t.Errorf("want 2 distinct credentials across sessions, got %v", seen)
+	}
+}
+
+// serveRecordingA2A starts a JSON-RPC A2A test server that replays events and
+// invokes record for every incoming request, so tests can inspect auth headers.
+func serveRecordingA2A(t *testing.T, record func(*http.Request), events ...a2a.Event) *httptest.Server {
+	t.Helper()
+	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(newA2AEventReplay(t, events)))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		inner.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// newSecureCard builds an agent card pointing at url that declares the given
+// security schemes and requirements, so the a2a AuthInterceptor attaches a
+// credential (it is a no-op unless the card carries a requirement).
+func newSecureCard(url string, schemes a2a.NamedSecuritySchemes, reqs a2a.SecurityRequirementsOptions) *a2a.AgentCard {
+	return &a2a.AgentCard{
+		Name:                 "a2a",
+		SupportedInterfaces:  []*a2a.AgentInterface{a2a.NewAgentInterface(url, a2a.TransportProtocolJSONRPC)},
+		Capabilities:         a2a.AgentCapabilities{Streaming: true},
+		SecuritySchemes:      schemes,
+		SecurityRequirements: reqs,
+	}
+}
+
+// bearerCard is a card whose single security scheme is HTTP Bearer.
+func bearerCard(url string) *a2a.AgentCard {
+	return newSecureCard(url,
+		a2a.NamedSecuritySchemes{"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"}},
+		a2a.SecurityRequirementsOptions{{a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{}}},
+	)
+}
+
+func firstErrorEvent(events []*session.Event) *session.Event {
+	for _, e := range events {
+		if e.ErrorMessage != "" {
+			return e
+		}
+	}
+	return nil
+}
+
+func eventsContainText(events []*session.Event, want string) bool {
+	for _, e := range events {
+		if e.LLMResponse.Content == nil {
+			continue
+		}
+		for _, p := range e.LLMResponse.Content.Parts {
+			if strings.Contains(p.Text, want) {
+				return true
+			}
+		}
+	}
+	return false
 }
