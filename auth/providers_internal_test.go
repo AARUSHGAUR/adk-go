@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/oauth2"
 )
@@ -131,5 +132,29 @@ func TestLazyTokenSourceHonorsCallerCancellation(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("init called %d times, want 1 (detached init reused)", got)
+	}
+}
+
+// TestLazyTokenSourceBoundsHungInit: a hung init is bounded by initTimeout, so it
+// fails with a deadline and the provider recovers — a later call retries instead
+// of waiting on the same stuck init forever.
+func TestLazyTokenSourceBoundsHungInit(t *testing.T) {
+	defer func(d time.Duration) { initTimeout = d }(initTimeout)
+	initTimeout = 20 * time.Millisecond
+
+	var calls atomic.Int64
+	p := lazyTokenSource(func(ctx context.Context) (oauth2.TokenSource, error) {
+		calls.Add(1)
+		<-ctx.Done() // hang until the bound fires
+		return nil, ctx.Err()
+	})
+
+	for i := range 2 {
+		if _, err := p.Credential(t.Context()); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("call %d: Credential() error = %v, want context.DeadlineExceeded", i, err)
+		}
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("init called %d times, want 2 (each call retries after a bounded hang)", got)
 	}
 }

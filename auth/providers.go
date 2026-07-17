@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -165,6 +166,9 @@ func ServiceAccount(cfg ServiceAccountConfig) CredentialProvider {
 	})
 }
 
+// initTimeout bounds a hung init so it fails and is retried, not wedged forever.
+var initTimeout = 30 * time.Second
+
 // lazyTokenSource builds a provider that runs init once in a detached goroutine
 // and reuses the source on success; a failed init is retried. Each caller waits
 // on init or its own ctx, so a slow init never blocks a caller past its deadline.
@@ -189,10 +193,11 @@ func lazyTokenSource(init func(context.Context) (oauth2.TokenSource, error)) Cre
 		if a == nil {
 			a = &attempt{done: make(chan struct{})}
 			cur = a
-			// Detached: keep the request's values but drop its cancellation, so
-			// the shared source outlives the caller that triggered it.
+			// Detach from the caller's cancellation (keep values); initTimeout bounds it.
 			go func() {
-				a.ts, a.err = init(context.WithoutCancel(ctx))
+				dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), initTimeout)
+				defer cancel()
+				a.ts, a.err = init(dctx)
 				mu.Lock()
 				if a.err == nil {
 					ts = a.ts
