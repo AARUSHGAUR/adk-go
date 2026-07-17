@@ -164,26 +164,53 @@ func ServiceAccount(cfg ServiceAccountConfig) CredentialProvider {
 	})
 }
 
-// lazyTokenSource builds a provider whose [oauth2.TokenSource] is initialized
-// once on first use and reused on success; a failed init is not memoized, so a
-// later call may retry. init receives the caller's context with cancellation
-// removed ([context.WithoutCancel]) so the long-lived source is not tied to one
-// request while still carrying its values.
+// lazyTokenSource builds a provider that runs init once in a detached goroutine
+// and reuses the source on success; a failed init is retried. Each caller waits
+// on init or its own ctx, so a slow init never blocks a caller past its deadline.
 func lazyTokenSource(init func(context.Context) (oauth2.TokenSource, error)) CredentialProvider {
+	type attempt struct {
+		done chan struct{}
+		ts   oauth2.TokenSource
+		err  error
+	}
 	var (
-		mu sync.Mutex
-		ts oauth2.TokenSource
+		mu  sync.Mutex
+		ts  oauth2.TokenSource
+		cur *attempt // in-flight init, for single-flight
 	)
 	return ProviderFunc(func(ctx context.Context) (Credential, error) {
 		mu.Lock()
-		defer mu.Unlock()
-		if ts == nil {
-			got, err := init(context.WithoutCancel(ctx))
-			if err != nil {
-				return nil, err
-			}
-			ts = got
+		if ts != nil {
+			mu.Unlock()
+			return OAuth2Credential{TokenSource: ts}, nil
 		}
-		return OAuth2Credential{TokenSource: ts}, nil
+		a := cur
+		if a == nil {
+			a = &attempt{done: make(chan struct{})}
+			cur = a
+			// Detached: keep the request's values but drop its cancellation, so
+			// the shared source outlives the caller that triggered it.
+			go func() {
+				a.ts, a.err = init(context.WithoutCancel(ctx))
+				mu.Lock()
+				if a.err == nil {
+					ts = a.ts
+				}
+				cur = nil // reset so a failure is retried
+				mu.Unlock()
+				close(a.done) // publishes a.ts/a.err to waiters
+			}()
+		}
+		mu.Unlock()
+
+		select {
+		case <-a.done:
+			if a.err != nil {
+				return nil, a.err
+			}
+			return OAuth2Credential{TokenSource: a.ts}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	})
 }

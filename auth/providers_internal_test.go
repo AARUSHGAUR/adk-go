@@ -74,7 +74,7 @@ func TestLazyTokenSourceSingleFlight(t *testing.T) {
 	release := make(chan struct{})
 	p := lazyTokenSource(func(context.Context) (oauth2.TokenSource, error) {
 		calls.Add(1)
-		<-release // block in init so callers pile up on the lock
+		<-release // block in init so concurrent callers pile up waiting for it
 		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "tok"}), nil
 	})
 
@@ -98,5 +98,38 @@ func TestLazyTokenSourceSingleFlight(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("init called %d times, want 1 (single-flight)", got)
+	}
+}
+
+// TestLazyTokenSourceHonorsCallerCancellation: a caller whose context is done
+// returns promptly instead of blocking on a slow init, while the detached init
+// still completes so a later caller reuses it (one init overall).
+func TestLazyTokenSourceHonorsCallerCancellation(t *testing.T) {
+	var calls atomic.Int64
+	release := make(chan struct{})
+	p := lazyTokenSource(func(context.Context) (oauth2.TokenSource, error) {
+		calls.Add(1)
+		<-release // hold init open until the test releases it
+		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "tok"}), nil
+	})
+
+	// A caller with an already-cancelled context must not block on the init.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := p.Credential(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Credential(cancelled) error = %v, want context.Canceled", err)
+	}
+
+	// Let the detached init finish; a fresh caller then reuses the memoized source.
+	close(release)
+	cred, err := p.Credential(t.Context())
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if oc, ok := cred.(OAuth2Credential); !ok || oc.TokenSource == nil {
+		t.Fatalf("got %T, want OAuth2Credential with a token source", cred)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("init called %d times, want 1 (detached init reused)", got)
 	}
 }
