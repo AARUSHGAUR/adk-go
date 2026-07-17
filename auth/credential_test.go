@@ -62,6 +62,11 @@ func TestCredentialApply(t *testing.T) {
 			want: http.Header{"Authorization": {"Bearer abc"}, "X-Extra": {"1"}},
 		},
 		{
+			name: "with headers overrides inner on conflict",
+			cred: auth.WithHeaders(auth.BearerCredential{Token: "abc"}, map[string]string{"Authorization": "Bearer override"}),
+			want: http.Header{"Authorization": {"Bearer override"}},
+		},
+		{
 			name: "oauth2 static access token",
 			cred: auth.OAuth2Credential{TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "tok", TokenType: "Bearer"})},
 			want: http.Header{"Authorization": {"Bearer tok"}},

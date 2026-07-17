@@ -150,7 +150,8 @@ func ServiceAccount(cfg ServiceAccountConfig) CredentialProvider {
 			return ts, nil
 		}
 		if len(cfg.JSONKey) > 0 {
-			// Parity with adk-python: an explicit-key access token requires scopes.
+			// Stricter than adk-python (scopes optional there): an explicit-key
+			// access token is scope-bound, so no scopes = unusable — fail fast.
 			if len(cfg.Scopes) == 0 {
 				return nil, fmt.Errorf("auth: scopes are required for a service-account access token")
 			}
