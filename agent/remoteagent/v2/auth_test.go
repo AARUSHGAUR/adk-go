@@ -62,14 +62,14 @@ func TestCredentialsServiceGet(t *testing.T) {
 		},
 		{
 			name: "oauth2 missing access token",
-			provider: auth.ProviderFunc(func(context.Context) (*auth.Credential, error) {
-				return &auth.Credential{OAuth2: &auth.OAuth2Credential{}}, nil
+			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
+				return auth.OAuth2Credential{}, nil
 			}),
 			wantErr: true,
 		},
 		{
 			name: "provider error",
-			provider: auth.ProviderFunc(func(context.Context) (*auth.Credential, error) {
+			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
 				return nil, errors.New("boom")
 			}),
 			wantErr: true,
@@ -181,7 +181,7 @@ func TestRemoteAgent_AuthFailOpenSendsUnauthenticated(t *testing.T) {
 		mu.Unlock()
 	}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
 
-	failing := auth.ProviderFunc(func(context.Context) (*auth.Credential, error) {
+	failing := auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
 		return nil, errors.New("resolve failed")
 	})
 
@@ -318,9 +318,9 @@ func TestRemoteAgent_AuthScopedPerSession(t *testing.T) {
 	}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
 
 	// Mints a token from the attached session id, proving the id reached the provider.
-	perSession := auth.ProviderFunc(func(ctx context.Context) (*auth.Credential, error) {
+	perSession := auth.ProviderFunc(func(ctx context.Context) (auth.Credential, error) {
 		sid, _ := a2aclient.SessionIDFrom(ctx)
-		return &auth.Credential{HTTP: &auth.HTTPCredential{Token: "tok-" + string(sid)}}, nil
+		return auth.BearerCredential{Token: "tok-" + string(sid)}, nil
 	})
 
 	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: bearerCard(srv.URL), Auth: perSession})

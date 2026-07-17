@@ -51,31 +51,28 @@ func (s credentialsService) Get(ctx context.Context, _ a2aclient.SessionID, _ a2
 }
 
 // credentialValue returns the raw secret the a2a AuthInterceptor transmits: the
-// access token for OAuth2, the bearer token for HTTP, or the API-key value.
-func credentialValue(c *auth.Credential) (string, error) {
-	switch {
-	case c == nil:
+// API-key value, the bearer token, or a freshly minted OAuth2 access token.
+func credentialValue(c auth.Credential) (string, error) {
+	switch v := c.(type) {
+	case nil:
 		return "", fmt.Errorf("remoteagent: nil credential")
-	case c.APIKey != nil:
-		return c.APIKey.Value, nil
-	case c.OAuth2 != nil:
-		if c.OAuth2.TokenSource != nil {
-			tok, err := c.OAuth2.TokenSource.Token()
-			if err != nil {
-				return "", fmt.Errorf("remoteagent: mint oauth2 token: %w", err)
-			}
-			return tok.AccessToken, nil
-		}
-		if c.OAuth2.AccessToken == "" {
-			return "", fmt.Errorf("remoteagent: oauth2 credential missing access token")
-		}
-		return c.OAuth2.AccessToken, nil
-	case c.HTTP != nil:
-		if c.HTTP.Token == "" {
+	case auth.APIKeyCredential:
+		return v.Value, nil
+	case auth.BearerCredential:
+		if v.Token == "" {
 			return "", fmt.Errorf("remoteagent: a2a auth requires a bearer token credential")
 		}
-		return c.HTTP.Token, nil
+		return v.Token, nil
+	case auth.OAuth2Credential:
+		if v.TokenSource == nil {
+			return "", fmt.Errorf("remoteagent: oauth2 credential missing token source")
+		}
+		tok, err := v.TokenSource.Token()
+		if err != nil {
+			return "", fmt.Errorf("remoteagent: mint oauth2 token: %w", err)
+		}
+		return tok.AccessToken, nil
 	default:
-		return "", fmt.Errorf("remoteagent: unsupported credential kind for a2a auth; want APIKey, HTTP bearer, or OAuth2")
+		return "", fmt.Errorf("remoteagent: unsupported credential kind %T for a2a auth; want APIKeyCredential, BearerCredential, or OAuth2Credential", c)
 	}
 }
