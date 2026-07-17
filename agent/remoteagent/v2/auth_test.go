@@ -15,13 +15,18 @@
 package remoteagent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
@@ -357,6 +362,78 @@ func TestRemoteAgent_AuthScopedPerSession(t *testing.T) {
 	}
 }
 
+// TestRemoteAgent_AuthAttachedToCleanupCancel pins that the cleanup path is
+// authenticated too, not just the message send: when a run leaves a non-terminal
+// task behind, the run loop issues a CancelTask to clean it up, and that request
+// must carry the resolved credential. Without scoping the cleanup context to the
+// session the cancel would go out unauthenticated and be rejected, leaking the
+// task.
+func TestRemoteAgent_AuthAttachedToCleanupCancel(t *testing.T) {
+	executor := &mockA2AExecutor{
+		// Keep the task non-terminal (submitted, then working) until the client
+		// stops consuming, so the run loop exits mid-task and must clean it up.
+		// Submit a task, then stream artifacts (which the run loop surfaces as
+		// events) until the client stops consuming, so the task stays non-terminal
+		// and the run loop must clean it up on exit.
+		executeFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+			return func(yield func(a2a.Event, error) bool) {
+				if !yield(a2a.NewSubmittedTask(reqCtx, reqCtx.Message), nil) {
+					return
+				}
+				for ctx.Err() == nil {
+					data := a2a.NewDataPart(map[string]any{"foo": "bar"})
+					if !yield(a2a.NewArtifactEvent(reqCtx, data), nil) {
+						return
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+		},
+		cancelFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+			return func(yield func(a2a.Event, error) bool) {
+				yield(a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil), nil)
+			}
+		},
+	}
+	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor))
+
+	var mu sync.Mutex
+	authByMethod := make(map[string]string) // JSON-RPC method -> Authorization header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := jsonRPCMethod(r)
+		mu.Lock()
+		authByMethod[method] = r.Header.Get("Authorization")
+		mu.Unlock()
+		inner.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: bearerCard(srv.URL), Auth: auth.StaticToken("secret-token")})
+	if err != nil {
+		t.Fatalf("NewA2A() error = %v", err)
+	}
+
+	// Stop consuming after the first event: the run loop then returns with a
+	// non-terminal task, and its deferred cleanup issues CancelTask before the
+	// range statement completes (the CancelTask is synchronous).
+	for _, err := range remoteAgent.Run(newInvocationContext(t, []*session.Event{newUserHello()})) {
+		if err != nil {
+			t.Fatalf("agent.Run() error = %v", err)
+		}
+		break
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	got, ok := authByMethod["CancelTask"]
+	if !ok {
+		t.Fatalf("no CancelTask request reached the server; cleanup did not run (saw %v)", authByMethod)
+	}
+	if got != "Bearer secret-token" {
+		t.Errorf("cleanup CancelTask Authorization = %q, want %q", got, "Bearer secret-token")
+	}
+}
+
 // serveRecordingA2A starts a JSON-RPC A2A test server that replays events and
 // invokes record for every incoming request, so tests can inspect auth headers.
 func serveRecordingA2A(t *testing.T, record func(*http.Request), events ...a2a.Event) *httptest.Server {
@@ -412,4 +489,19 @@ func eventsContainText(events []*session.Event, want string) bool {
 		}
 	}
 	return false
+}
+
+// jsonRPCMethod peeks the JSON-RPC method of an incoming request and restores
+// the body so the wrapped handler can still read it.
+func jsonRPCMethod(r *http.Request) string {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return ""
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	var rpc struct {
+		Method string `json:"method"`
+	}
+	_ = json.Unmarshal(body, &rpc)
+	return rpc.Method
 }

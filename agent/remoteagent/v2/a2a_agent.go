@@ -275,13 +275,21 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return yield(nil, err)
 		}
 
+		// When Auth is set, scope every outgoing call to the ADK session so the a2a
+		// auth interceptor resolves credentials: the message send below and the
+		// cleanup CancelTask issued from the deferred cleanupRemoteTask.
+		var sendCtx context.Context = ctx
+		if cfg.Auth != nil {
+			sendCtx = a2aclient.AttachSessionID(ctx, a2aclient.SessionID(ctx.Session().ID()))
+		}
+
 		var lastEvent a2a.Event
 		defer func() {
 			err := lastErr
 			if err == nil && ctx.Err() != nil {
 				err = context.Cause(ctx)
 			}
-			cleanupRemoteTask(ctx, cfg, card, sender, lastEvent, err)
+			cleanupRemoteTask(sendCtx, cfg, card, sender, lastEvent, err)
 		}()
 
 		processEvent := func(a2aEvent a2a.Event, a2aErr error) bool {
@@ -317,13 +325,6 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 				}
 			}
 			return true
-		}
-
-		// The auth interceptor (wired when cfg.Auth is set) resolves credentials
-		// scoped to the session id attached here.
-		var sendCtx context.Context = ctx
-		if cfg.Auth != nil {
-			sendCtx = a2aclient.AttachSessionID(ctx, a2aclient.SessionID(ctx.Session().ID()))
 		}
 
 		if ctx.RunConfig().StreamingMode == agent.StreamingModeNone {
