@@ -26,7 +26,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
@@ -143,8 +142,7 @@ func TestRemoteAgent_AuthAttachesBearerHeader(t *testing.T) {
 	card := bearerCard(srv.URL)
 	provider := func(context.Context) (*a2a.AgentCard, error) { return card, nil }
 
-	// Auth must attach whichever way the card is supplied, and on both the
-	// streaming (SendStreamingMessage) and non-streaming (SendMessage) paths.
+	// Cover both card sources (static/provider) and both send paths (streaming/not).
 	tests := []struct {
 		name      string
 		cfg       A2AConfig
@@ -229,9 +227,8 @@ func TestRemoteAgent_AuthFailOpenSendsUnauthenticated(t *testing.T) {
 	}
 }
 
-// TestRemoteAgent_AuthAttachesAPIKeyHeader covers the apiKey scheme end-to-end:
-// the interceptor must place the raw key in the header named by the card's
-// scheme, not in "Authorization" and without a "Bearer " prefix.
+// TestRemoteAgent_AuthAttachesAPIKeyHeader covers the apiKey scheme: the raw key
+// goes in the card's named header, not "Authorization".
 func TestRemoteAgent_AuthAttachesAPIKeyHeader(t *testing.T) {
 	var mu sync.Mutex
 	var gotKey, gotAuth string
@@ -271,10 +268,9 @@ func TestRemoteAgent_AuthAttachesAPIKeyHeader(t *testing.T) {
 	}
 }
 
-// TestRemoteAgent_AuthAcceptedByEnforcingServer proves the attached credential
-// is usable, not merely present: against a server that rejects the request
-// unless it carries the right bearer token, the correct token is accepted and a
-// wrong one is rejected (surfacing as an error event, per the default converter).
+// TestRemoteAgent_AuthAcceptedByEnforcingServer proves the credential is usable,
+// not merely present: a server that requires the right bearer token accepts the
+// correct token and rejects a wrong one.
 func TestRemoteAgent_AuthAcceptedByEnforcingServer(t *testing.T) {
 	const goodToken = "good-token"
 	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(newA2AEventReplay(t, []a2a.Event{
@@ -330,8 +326,8 @@ func TestRemoteAgent_AuthAcceptedByEnforcingServer(t *testing.T) {
 }
 
 // TestRemoteAgent_AuthScopedPerSession verifies the run loop attaches the ADK
-// session id to each outgoing call, so a session-aware provider (one reading
-// a2aclient.SessionIDFrom) resolves a distinct credential per session.
+// session id to each outgoing call, so a session-aware provider resolves a
+// distinct credential per session.
 func TestRemoteAgent_AuthScopedPerSession(t *testing.T) {
 	var mu sync.Mutex
 	var gotAuth string
@@ -386,31 +382,25 @@ func TestRemoteAgent_AuthScopedPerSession(t *testing.T) {
 	}
 }
 
-// TestRemoteAgent_AuthAttachedToCleanupCancel pins that the cleanup path is
-// authenticated too, not just the message send: when a run leaves a non-terminal
-// task behind, the run loop issues a CancelTask to clean it up, and that request
-// must carry the resolved credential. Without scoping the cleanup context to the
-// session the cancel would go out unauthenticated and be rejected, leaking the
-// task.
+// TestRemoteAgent_AuthAttachedToCleanupCancel pins that the cleanup CancelTask is
+// authenticated too, not just the message send — otherwise it goes out
+// unauthenticated, is rejected, and leaks the task.
 func TestRemoteAgent_AuthAttachedToCleanupCancel(t *testing.T) {
 	executor := &mockA2AExecutor{
-		// Keep the task non-terminal (submitted, then working) until the client
-		// stops consuming, so the run loop exits mid-task and must clean it up.
-		// Submit a task, then stream artifacts (which the run loop surfaces as
-		// events) until the client stops consuming, so the task stays non-terminal
-		// and the run loop must clean it up on exit.
+		// Submit a task and stream one artifact, then stay non-terminal until the
+		// client stops consuming (the run loop breaks mid-task), so its deferred
+		// cleanup must CancelTask. Block on cancellation — the same signal the
+		// old loop polled via ctx.Err() — instead of spinning.
 		executeFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 			return func(yield func(a2a.Event, error) bool) {
 				if !yield(a2a.NewSubmittedTask(reqCtx, reqCtx.Message), nil) {
 					return
 				}
-				for ctx.Err() == nil {
-					data := a2a.NewDataPart(map[string]any{"foo": "bar"})
-					if !yield(a2a.NewArtifactEvent(reqCtx, data), nil) {
-						return
-					}
-					time.Sleep(time.Millisecond)
+				data := a2a.NewDataPart(map[string]any{"foo": "bar"})
+				if !yield(a2a.NewArtifactEvent(reqCtx, data), nil) {
+					return
 				}
+				<-ctx.Done()
 			}
 		},
 		cancelFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
@@ -437,9 +427,8 @@ func TestRemoteAgent_AuthAttachedToCleanupCancel(t *testing.T) {
 		t.Fatalf("NewA2A() error = %v", err)
 	}
 
-	// Stop consuming after the first event: the run loop then returns with a
-	// non-terminal task, and its deferred cleanup issues CancelTask before the
-	// range statement completes (the CancelTask is synchronous).
+	// Stop consuming after the first event so the run loop returns mid-task; its
+	// deferred cleanup issues CancelTask synchronously before the range ends.
 	for _, err := range remoteAgent.Run(newInvocationContext(t, []*session.Event{newUserHello()})) {
 		if err != nil {
 			t.Fatalf("agent.Run() error = %v", err)
