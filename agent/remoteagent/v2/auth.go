@@ -16,6 +16,7 @@ package remoteagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -30,7 +31,10 @@ import (
 // prefix or the API-key header itself), so Get returns the raw secret.
 //
 // The provider is not scheme-aware; it yields the same credential for whichever
-// scheme the card lists first, which covers the common single-scheme case.
+// scheme the card lists first, which covers the common single-scheme case. A
+// consequence is that if a card declares a scheme other than the one intended,
+// the secret is placed per that scheme (e.g. a bearer token into an API-key
+// header) — one more reason to enable Auth only for trusted cards.
 type credentialsService struct {
 	provider auth.CredentialProvider
 }
@@ -41,7 +45,7 @@ var _ a2aclient.CredentialsService = credentialsService{}
 func (s credentialsService) Get(ctx context.Context, _ a2aclient.SessionID, _ a2a.SecuritySchemeName) (a2aclient.AuthCredential, error) {
 	cred, err := s.provider.Credential(ctx)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("remoteagent: resolve auth credential: %w", err)
 	}
 	value, err := credentialValue(cred)
 	if err != nil {
@@ -55,21 +59,27 @@ func (s credentialsService) Get(ctx context.Context, _ a2aclient.SessionID, _ a2
 func credentialValue(c auth.Credential) (string, error) {
 	switch v := c.(type) {
 	case nil:
-		return "", fmt.Errorf("remoteagent: nil credential")
+		return "", errors.New("remoteagent: nil credential")
 	case auth.APIKeyCredential:
+		if v.Value == "" {
+			return "", errors.New("remoteagent: a2a auth requires a non-empty API key value")
+		}
 		return v.Value, nil
 	case auth.BearerCredential:
 		if v.Token == "" {
-			return "", fmt.Errorf("remoteagent: a2a auth requires a bearer token credential")
+			return "", errors.New("remoteagent: a2a auth requires a bearer token credential")
 		}
 		return v.Token, nil
 	case auth.OAuth2Credential:
 		if v.TokenSource == nil {
-			return "", fmt.Errorf("remoteagent: oauth2 credential missing token source")
+			return "", errors.New("remoteagent: oauth2 credential missing token source")
 		}
 		tok, err := v.TokenSource.Token()
 		if err != nil {
 			return "", fmt.Errorf("remoteagent: mint oauth2 token: %w", err)
+		}
+		if tok == nil || tok.AccessToken == "" {
+			return "", errors.New("remoteagent: oauth2 token source returned an empty access token")
 		}
 		return tok.AccessToken, nil
 	default:

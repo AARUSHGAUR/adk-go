@@ -61,9 +61,33 @@ func TestCredentialsServiceGet(t *testing.T) {
 			want:     "at",
 		},
 		{
-			name: "oauth2 missing access token",
+			name: "oauth2 missing token source",
 			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
 				return auth.OAuth2Credential{}, nil
+			}),
+			wantErr: true,
+		},
+		{
+			name:     "oauth2 empty access token",
+			provider: auth.TokenSourceProvider(oauth2.StaticTokenSource(&oauth2.Token{AccessToken: ""})),
+			wantErr:  true,
+		},
+		{
+			name:     "empty api key value",
+			provider: auth.APIKey("X-Api-Key", ""),
+			wantErr:  true,
+		},
+		{
+			name: "nil credential",
+			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
+				return nil, nil
+			}),
+			wantErr: true,
+		},
+		{
+			name: "unsupported credential kind",
+			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
+				return auth.BasicCredential{Username: "u", Password: "p"}, nil
 			}),
 			wantErr: true,
 		},
@@ -102,8 +126,8 @@ func TestNewA2AAuthWithClientProviderIsError(t *testing.T) {
 		Auth:           auth.StaticToken("tok"),
 		ClientProvider: NewA2AClientProvider(a2aclient.NewFactory()),
 	})
-	if err == nil {
-		t.Fatal("NewA2A() = nil error, want error for Auth combined with a custom ClientProvider")
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined with a custom ClientProvider") {
+		t.Fatalf("NewA2A() error = %v, want error about Auth combined with a custom ClientProvider", err)
 	}
 }
 
