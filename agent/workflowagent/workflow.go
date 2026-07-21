@@ -118,27 +118,25 @@ func (a *workflowAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Even
 }
 
 // detectResume inspects the inbound user message for FunctionResponses
-// targeting a previously-emitted RequestInput. Returns the
-// responses map keyed by InterruptID (suitable for
-// Workflow.Resume), the RunState loaded from session, and true if
-// this turn is a resume; (nil, nil, false) for a fresh turn.
+// that answer a paused node's long-running interrupt. Returns the
+// responses map keyed by InterruptID (suitable for Workflow.Resume),
+// the RunState loaded from session, and true if this turn is a resume;
+// (nil, nil, false) for a fresh turn.
 func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]any, *workflow.RunState, bool, error) {
 	frs := utils.FunctionResponses(ctx.UserContent())
 	if len(frs) == 0 {
 		return nil, nil, false, nil
 	}
 
-	responses := map[string]any{}
-	for _, fr := range frs {
-		if fr.Name != workflow.WorkflowInputFunctionCallName {
-			continue
-		}
-		responses[fr.ID] = decodeWorkflowInputResponse(fr)
-	}
-	if len(responses) == 0 {
-		return nil, nil, false, nil
-	}
-
+	// A resume answers a paused node by matching a FunctionResponse to an
+	// open interrupt by ID. Match by ID, not by function name: besides the
+	// workflow's own adk_request_input, an LlmAgent node can pause on a
+	// tool's long-running request (adk_request_credential /
+	// adk_request_confirmation), and the engine's pause is name-agnostic
+	// (it rides on Event.LongRunningToolIDs). A stale or mistargeted
+	// response still reconstructs state; Workflow.Resume then yields
+	// ErrNothingToResume rather than silently starting a fresh Run.
+	//
 	// Scope rehydration to this run's invocation (the runner reuses the
 	// paused run's ID on resume) so a prior completed run in the same
 	// session does not leak in.
@@ -149,6 +147,17 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 		return nil, nil, false, err
 	}
 	if state == nil {
+		return nil, nil, false, nil
+	}
+
+	responses := map[string]any{}
+	for _, fr := range frs {
+		if fr == nil || fr.ID == "" {
+			continue
+		}
+		responses[fr.ID] = decodeWorkflowInputResponse(fr)
+	}
+	if len(responses) == 0 {
 		return nil, nil, false, nil
 	}
 

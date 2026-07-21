@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	internalcontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -63,6 +64,19 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	// via RunNode. Mirrors runner.newAgentNode.
 	cfg.EmitsOwnSpan = true
 
+	// A paused AgentNode must re-run its agent to finish the work it
+	// started — e.g. complete a tool call after the user answered a
+	// long-running request (adk_request_credential / adk_request_confirmation)
+	// the agent's tool raised. Default to re-entry so Resume re-activates
+	// the node from history instead of taking the handoff path, which
+	// would treat the raw user response as the node's output and never
+	// re-run the agent. Mirrors runner.newAgentNode + the DynamicNode
+	// default; an explicit caller value still wins.
+	if cfg.RerunOnResume == nil {
+		rerun := true
+		cfg.RerunOnResume = &rerun
+	}
+
 	return &AgentNode{
 		BaseNode: NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
 		agent:    a,
@@ -90,6 +104,15 @@ func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 // Run implements the Node interface.
 func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		// On resume — this node paused earlier on a long-running interrupt
+		// its agent raised (e.g. adk_request_credential), now answered in
+		// history — the agent must CONTINUE from history, not re-process the
+		// original input. Re-seeding the input would make a single_turn/task
+		// LlmAgent re-call the still-pending tool and pause again, looping.
+		// Drop the input so the agent resumes. Mirrors runner.runAgentNodeBody.
+		if nodeIsResuming(ctx.Session(), n.agent.Name()) {
+			input = nil
+		}
 		userContent, err := nodeInputToContent(input)
 		if err != nil {
 			yield(nil, err)
@@ -161,6 +184,48 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			}
 		}
 	}
+}
+
+// nodeIsResuming reports whether this node's agent is being re-run after
+// a long-running interrupt it raised earlier was answered in session
+// history. Scoped to the agent's own events (by author) so a different
+// node resuming in the same run is not mistaken for this one. On resume
+// the agent continues from history, so the node input is dropped (see
+// AgentNode.Run). Mirrors runner.answeredOpenInterrupts.
+func nodeIsResuming(sess session.Session, agentName string) bool {
+	if sess == nil {
+		return false
+	}
+	events := sess.Events()
+	if events == nil {
+		return false
+	}
+	open := map[string]struct{}{}
+	answered := map[string]struct{}{}
+	for i := 0; i < events.Len(); i++ {
+		ev := events.At(i)
+		if ev == nil {
+			continue
+		}
+		if ev.Author == agentName {
+			for _, id := range ev.LongRunningToolIDs {
+				if id != "" {
+					open[id] = struct{}{}
+				}
+			}
+		}
+		for _, fr := range utils.FunctionResponses(utils.Content(ev)) {
+			if fr != nil && fr.ID != "" {
+				answered[fr.ID] = struct{}{}
+			}
+		}
+	}
+	for id := range open {
+		if _, ok := answered[id]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // synthesizeAgentOutput sets Event.Output from concatenated model
