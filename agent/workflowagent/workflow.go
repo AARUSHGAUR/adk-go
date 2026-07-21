@@ -128,15 +128,6 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 		return nil, nil, false, nil
 	}
 
-	// A resume answers a paused node by matching a FunctionResponse to an
-	// open interrupt by ID. Match by ID, not by function name: besides the
-	// workflow's own adk_request_input, an LlmAgent node can pause on a
-	// tool's long-running request (adk_request_credential /
-	// adk_request_confirmation), and the engine's pause is name-agnostic
-	// (it rides on Event.LongRunningToolIDs). A stale or mistargeted
-	// response still reconstructs state; Workflow.Resume then yields
-	// ErrNothingToResume rather than silently starting a fresh Run.
-	//
 	// Scope rehydration to this run's invocation (the runner reuses the
 	// paused run's ID on resume) so a prior completed run in the same
 	// session does not leak in.
@@ -150,12 +141,18 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 		return nil, nil, false, nil
 	}
 
+	// Key by interrupt ID, not function name: an agent node pauses on a
+	// tool's long-running request (adk_request_credential /
+	// adk_request_confirmation), not just the workflow's own
+	// adk_request_input, and the engine's pause is name-agnostic
+	// (Event.LongRunningToolIDs). A stale response matches nothing, so
+	// Workflow.Resume yields ErrNothingToResume instead of a silent fresh Run.
 	responses := map[string]any{}
 	for _, fr := range frs {
 		if fr == nil || fr.ID == "" {
 			continue
 		}
-		responses[fr.ID] = decodeWorkflowInputResponse(fr)
+		responses[fr.ID] = decodeResumeResponse(fr)
 	}
 	if len(responses) == 0 {
 		return nil, nil, false, nil
@@ -164,8 +161,11 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 	return responses, state, true, nil
 }
 
-// decodeWorkflowInputResponse extracts the user-supplied payload
-// from a FunctionResponse targeting a workflow input request.
+// decodeResumeResponse extracts the user-supplied payload from a
+// FunctionResponse that answers a paused node's interrupt — a workflow input
+// (adk_request_input), tool consent (adk_request_credential), or confirmation
+// (adk_request_confirmation). detectResume matches by interrupt ID, so this is
+// no longer specific to workflow input.
 //
 // Three accepted shapes, in priority order:
 //
@@ -175,7 +175,7 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 //     other type, it is returned as-is.
 //  2. {"payload": <any>}     — value returned verbatim.
 //  3. anything else           — the whole Response map is returned.
-func decodeWorkflowInputResponse(fr *genai.FunctionResponse) any {
+func decodeResumeResponse(fr *genai.FunctionResponse) any {
 	if raw, ok := fr.Response["response"]; ok {
 		if s, isStr := raw.(string); isStr {
 			var decoded any

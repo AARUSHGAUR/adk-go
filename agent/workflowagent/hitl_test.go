@@ -357,9 +357,11 @@ func TestWorkflowAgent_AgentNode_CredentialResume(t *testing.T) {
 
 	var workerRuns atomic.Int32
 	var resumeGotInput atomic.Bool
+	// The fake isn't an LlmAgent, so opt into RerunOnResume explicitly (a
+	// real LlmAgent node gets it by default).
 	worker, err := workflow.NewAgentNode(
 		newConsentAgent(t, "worker", fcID, &workerRuns, &resumeGotInput),
-		workflow.NodeConfig{},
+		workflow.NodeConfig{RerunOnResume: ptrTrue()},
 	)
 	if err != nil {
 		t.Fatalf("NewAgentNode: %v", err)

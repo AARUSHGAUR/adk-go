@@ -51,36 +51,36 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 		return nil, fmt.Errorf("resolving output schema for agent %q: %w", a.Name(), err)
 	}
 
-	if llmA, ok := a.(llminternal.Agent); ok {
-		state := llminternal.Reveal(llmA)
-		if state.Mode == llminternal.ModeUnset {
-			state.Mode = llminternal.ModeSingleTurn
-		}
-	}
-
-	// The wrapped agent's Run already emits an invoke_agent span, so
-	// the scheduler must not add a redundant invoke_node wrapper —
-	// whether this node is activated by a static edge or delegated to
-	// via RunNode. Mirrors runner.newAgentNode.
-	cfg.EmitsOwnSpan = true
-
-	// A paused AgentNode must re-run its agent to finish the work it
-	// started — e.g. complete a tool call after the user answered a
-	// long-running request (adk_request_credential / adk_request_confirmation)
-	// the agent's tool raised. Default to re-entry so Resume re-activates
-	// the node from history instead of taking the handoff path, which
-	// would treat the raw user response as the node's output and never
-	// re-run the agent. Mirrors runner.newAgentNode + the DynamicNode
-	// default; an explicit caller value still wins.
-	if cfg.RerunOnResume == nil {
-		rerun := true
-		cfg.RerunOnResume = &rerun
-	}
+	cfg = applyAgentNodeDefaults(a, cfg)
 
 	return &AgentNode{
 		BaseNode: NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
 		agent:    a,
 	}, nil
+}
+
+// applyAgentNodeDefaults fills in the AgentNode config defaults, mirroring
+// applyDynamicDefaults. EmitsOwnSpan is always set: the agent's Run already
+// emits invoke_agent, so the scheduler must not add a redundant invoke_node
+// wrapper. LlmAgent nodes additionally default to single_turn mode and to
+// re-entry on resume (so a paused agent finishes instead of handing off),
+// matching runner.newAgentNode / adk-python build_node; other kinds keep the
+// engine default and an explicit RerunOnResume always wins.
+func applyAgentNodeDefaults(a agent.Agent, cfg NodeConfig) NodeConfig {
+	cfg.EmitsOwnSpan = true
+
+	llmA, ok := a.(llminternal.Agent)
+	if !ok {
+		return cfg
+	}
+	if state := llminternal.Reveal(llmA); state.Mode == llminternal.ModeUnset {
+		state.Mode = llminternal.ModeSingleTurn
+	}
+	if cfg.RerunOnResume == nil {
+		rerun := true
+		cfg.RerunOnResume = &rerun
+	}
+	return cfg
 }
 
 // NewAgentNodeWithSchemas is a convenience wrapper for NewAgentNodeWithSchemasTyped[any, any].
@@ -104,13 +104,10 @@ func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 // Run implements the Node interface.
 func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		// On resume — this node paused earlier on a long-running interrupt
-		// its agent raised (e.g. adk_request_credential), now answered in
-		// history — the agent must CONTINUE from history, not re-process the
-		// original input. Re-seeding the input would make a single_turn/task
-		// LlmAgent re-call the still-pending tool and pause again, looping.
-		// Drop the input so the agent resumes. Mirrors runner.runAgentNodeBody.
-		if nodeIsResuming(ctx.Session(), n.agent.Name()) {
+		// On resume, re-feeding the input would make a single_turn/task
+		// LlmAgent re-call the still-pending tool and pause again; drop it
+		// so the agent continues from history. Mirrors runner.runAgentNodeBody.
+		if nodeIsResuming(ctx.Session(), ctx.InvocationID(), n.agent.Name()) {
 			input = nil
 		}
 		userContent, err := nodeInputToContent(input)
@@ -186,13 +183,19 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 	}
 }
 
-// nodeIsResuming reports whether this node's agent is being re-run after
-// a long-running interrupt it raised earlier was answered in session
-// history. Scoped to the agent's own events (by author) so a different
-// node resuming in the same run is not mistaken for this one. On resume
-// the agent continues from history, so the node input is dropped (see
-// AgentNode.Run). Mirrors runner.answeredOpenInterrupts.
-func nodeIsResuming(sess session.Session, agentName string) bool {
+// nodeIsResuming reports whether this node's agent raised a long-running
+// interrupt that a later FunctionResponse has since answered — i.e. this turn is
+// a HITL resume of THIS node, so Run should drop the node input.
+//
+// The open-interrupt set is scoped to invocationID and to the agent's own events
+// (by author), stricter than the runner's unscoped answeredOpenInterrupts, so a
+// prior run or a sibling node's resume isn't taken for this node's. (A single
+// agent per invocation lets the runner stay unscoped; a graph can't.)
+//
+// Author scoping means an interrupt raised under a different author — e.g. a
+// sub-agent the coordinator delegated to — is not seen here; that resume rides
+// on the child node's own Run.
+func nodeIsResuming(sess session.Session, invocationID, agentName string) bool {
 	if sess == nil {
 		return false
 	}
@@ -205,6 +208,9 @@ func nodeIsResuming(sess session.Session, agentName string) bool {
 	for i := 0; i < events.Len(); i++ {
 		ev := events.At(i)
 		if ev == nil {
+			continue
+		}
+		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
 		if ev.Author == agentName {
