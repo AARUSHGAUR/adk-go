@@ -337,7 +337,7 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 	// torn down by cancellation or a deadline. The context lifetime is unreliable
 	// during forced teardown (a detached parent may already have ended), and
 	// adk-python does not cancel remote tasks at all; the remote task expires on its own.
-	if cause != nil && (errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded)) {
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
 		return
 	}
 
