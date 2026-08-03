@@ -16,6 +16,7 @@ package sessiontestsuite
 
 import (
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -668,6 +669,76 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			if diff := cmp.Diff(event, gotEvent, cmpOpts...); diff != "" {
 				t.Errorf("Event mismatch (-want +got):\n%s", diff)
 			}
+		})
+
+		// Concurrent agents (parallelagent, the workflow scheduler) share one
+		// session.Session: sub-agent goroutines read Events() to build their LLM
+		// request while the runner goroutine appends events produced by a
+		// sibling. A Session implementation must therefore guard its event slice.
+		// Run under -race, as CI does.
+		t.Run("concurrent_reads_during_append", func(t *testing.T) {
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+			curSession := created.Session
+
+			const appends = 30
+			// Readers run until the writer is done rather than for a fixed
+			// count: an append may hit a real backend and take orders of
+			// magnitude longer than a read, and readers that finish early
+			// would leave most of the writes unobserved.
+			done := make(chan struct{})
+
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			// Writer: the runner goroutine committing events.
+			go func() {
+				defer wg.Done()
+				defer close(done)
+				for i := range appends {
+					err := s.AppendEvent(ctx, curSession, &session.Event{
+						ID:           "event" + strconv.Itoa(i),
+						Author:       "user",
+						InvocationID: "inv1",
+					})
+					if err != nil {
+						t.Errorf("AppendEvent() error = %v", err)
+						return
+					}
+				}
+			}()
+
+			// Reader: a sibling sub-agent goroutine walking the history.
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-done:
+						return
+					default:
+					}
+
+					_ = curSession.LastUpdateTime()
+
+					evs := curSession.Events()
+					if evs == nil {
+						continue
+					}
+					for e := range evs.All() {
+						if e == nil {
+							t.Errorf("Events().All() yielded a nil event")
+							return
+						}
+					}
+				}
+			}()
+
+			wg.Wait()
 		})
 	})
 

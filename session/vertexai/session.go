@@ -58,6 +58,9 @@ func (s *localSession) State() session.State {
 }
 
 func (s *localSession) Events() session.Events {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	return events(s.events)
 }
 

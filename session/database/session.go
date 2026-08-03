@@ -58,6 +58,9 @@ func (s *localSession) State() session.State {
 }
 
 func (s *localSession) Events() session.Events {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	return events(s.events)
 }
 
@@ -66,6 +69,16 @@ func (s *localSession) LastUpdateTime() time.Time {
 	defer s.mu.RUnlock()
 
 	return s.updatedAt
+}
+
+// setUpdatedAt records the last update time. AppendEvent sets this only after
+// the event has been persisted, so it happens outside appendEvent's critical
+// section and needs its own lock to stay ordered with LastUpdateTime.
+func (s *localSession) setUpdatedAt(t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.updatedAt = t
 }
 
 func (s *localSession) appendEvent(event *session.Event) error {
