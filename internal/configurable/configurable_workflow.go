@@ -17,8 +17,10 @@ package configurable
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -163,7 +165,10 @@ func parseEdges(ctx context.Context, parentPath string, nodes []yaml.Node) ([]wo
 			routerNode := chainNodes[len(chainNodes)-1]
 
 			for _, routeMap := range routeMaps {
-				for routeVal, targetRef := range routeMap {
+				// Sorted, not ranged: a Go map has no order of its own, and edge
+				// order is observable at runtime.
+				for _, routeVal := range slices.Sorted(maps.Keys(routeMap)) {
+					targetRef := routeMap[routeVal]
 					targetNode, err := resolveNodeLike(ctx, parentPath, targetRef)
 					if err != nil {
 						return nil, err
