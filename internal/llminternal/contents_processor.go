@@ -43,13 +43,17 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			return // In python, no error is yielded.
 		}
 		state := llmAgent.internal()
-		isSingleTurn := ResolvedMode(ctx, state.Mode) == ModeSingleTurn
+		name := ctx.Agent().Name()
+		// Two questions, deliberately answered from different sources.
+		// Hiding history follows the placement alone: only an agent a
+		// placement seeded with one synthetic turn loses its history.
+		// Shaping that turn as single_turn also honours the declaration.
+		boundMode, bound := BoundMode(ctx, name)
 		fn := buildContentsDefault // "" or "default".
-		// A single_turn agent produces its answer in one exchange, so it
-		// gets the current turn only, never the conversation history.
-		if state.IncludeContents == "none" || isSingleTurn {
+		if state.IncludeContents == "none" || (bound && boundMode == ModeSingleTurn) {
 			fn = buildContentsCurrentTurnContextOnly
 		}
+		isSingleTurn := ModeFor(ctx, name, state.Mode) == ModeSingleTurn
 		var events []*session.Event
 		if ctx.Session() != nil {
 			for e := range ctx.Session().Events().All() {
