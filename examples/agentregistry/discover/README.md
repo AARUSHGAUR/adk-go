@@ -33,7 +33,6 @@ Each iterator is drained by the same generic `printAll` helper: it prints the di
 
 ```bash
 export GOOGLE_CLOUD_PROJECT=your-project
-export GOOGLE_CLOUD_LOCATION=global
 
 go run ./examples/agentregistry/discover/
 ```

@@ -16,7 +16,6 @@ Both samples talk to the real `agentregistry.googleapis.com`. You need:
 gcloud services enable agentregistry.googleapis.com --project=your-project --billing-project=your-project
 gcloud auth application-default login
 export GOOGLE_CLOUD_PROJECT=your-project
-export GOOGLE_CLOUD_LOCATION=global   # the registry's default location
 ```
 
 You probably don't have to register anything to try the samples: enabling a supported Google Cloud API auto-registers its **remote MCP server** in your registry. A fresh project typically already lists `run.googleapis.com`, `logging.googleapis.com`, `compute.googleapis.com`, and friends — all of which `bind` can consume as-is.
@@ -26,8 +25,8 @@ The client authenticates with ADC and bills the quota project (`GOOGLE_CLOUD_QUO
 To see what is registered without running any Go code:
 
 ```bash
-gcloud agent-registry agents list      --project=$GOOGLE_CLOUD_PROJECT --location=$GOOGLE_CLOUD_LOCATION --billing-project=$GOOGLE_CLOUD_PROJECT
-gcloud agent-registry mcp-servers list --project=$GOOGLE_CLOUD_PROJECT --location=$GOOGLE_CLOUD_LOCATION --billing-project=$GOOGLE_CLOUD_PROJECT
+gcloud agent-registry agents list      --location=global --project=$GOOGLE_CLOUD_PROJECT --billing-project=$GOOGLE_CLOUD_PROJECT
+gcloud agent-registry mcp-servers list --location=global --project=$GOOGLE_CLOUD_PROJECT --billing-project=$GOOGLE_CLOUD_PROJECT
 ```
 
 Reference: [Agent Registry overview](https://docs.cloud.google.com/agent-registry/overview) — [set up](https://docs.cloud.google.com/agent-registry/setup), [manage agents](https://docs.cloud.google.com/agent-registry/manage-agents), [manage MCP servers and tools](https://docs.cloud.google.com/agent-registry/manage-mcp-tools).

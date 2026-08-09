@@ -47,12 +47,12 @@ The live tool set comes from the MCP server itself once connected — the catalo
 
 ```bash
 export GOOGLE_CLOUD_PROJECT=your-project
-export GOOGLE_CLOUD_LOCATION=global
 
 # Model credentials: a Gemini API key...
 export GOOGLE_API_KEY=...
-# ...or Vertex AI (GOOGLE_CLOUD_PROJECT/LOCATION are already set above)
+# ...or Vertex AI, which needs a location of its own
 export GOOGLE_GENAI_USE_VERTEXAI=true
+export GOOGLE_CLOUD_LOCATION=global
 
 go run ./examples/agentregistry/bind/ console
 ```
