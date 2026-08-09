@@ -21,21 +21,38 @@ In production those are separate deployments. Only the publisher half moves; the
 
 ```mermaid
 sequenceDiagram
-    participant You as Setup (one-time)
+    autonumber
+    actor You as You
     participant AR as Agent Registry
-    participant C as agentregistry.Client
-    participant RA as RemoteAgent
-    participant S as Local A2A server
+    participant Main as main()<br/>consumer half
+    participant Srv as A2A server<br/>localhost:8765
+    participant Echo as registry_echo<br/>(your agent)
 
-    You->>AR: services create (embedded A2A card,<br/>url = http://localhost:8765)
-    AR-->>You: projected agent name
-    Note over AR: the registry stores the card.<br/>It never calls the URL.
-    C->>AR: GetAgent(name)
-    AR-->>C: card + protocols
-    C->>RA: build A2A client from the card
-    RA->>S: sendMessage (HTTP+JSON, direct)
-    S-->>RA: "echo: ..."
+    rect rgb(238,245,255)
+    Note over You,AR: Setup — once, before the sample runs
+    You->>AR: services create — card with url http://localhost:8765
+    AR-->>You: projects/.../agents/agentregistry-...
+    end
+    Note over AR: The registry stores the card.<br/>It never calls the URL inside it.
+
+    Main->>Srv: serve() — expose registry_echo over A2A
+
+    rect rgb(255,249,230)
+    Note over Main,AR: Resolve — the only time the registry is read
+    Main->>AR: RemoteAgent(name), which fetches the record
+    AR-->>Main: card: registry_echo, http://localhost:8765, HTTP+JSON
+    end
+
+    rect rgb(236,252,238)
+    Note over Main,Echo: Exchange — straight to the card's URL, registry not involved
+    Main->>Srv: sendMessage "Hello from the registry!"
+    Srv->>Echo: invoke, UserContent = "Hello from the registry!"
+    Echo-->>Srv: "echo: Hello from the registry!"
+    Srv-->>Main: session.Event
+    end
 ```
+
+The right-hand pair is the same agent seen twice: `registry_echo` is what this process publishes, and `registry_echo` is the name the consumer half learns from the catalog. The message text is what makes the loop legible — it leaves `main()`, reaches your `agent.New` as `UserContent`, and comes back prefixed.
 
 ## Setup
 
