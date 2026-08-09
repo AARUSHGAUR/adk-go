@@ -97,8 +97,9 @@ That prints the name in project-number form; the client accepts either that or t
 
 ## Running the sample
 
+Setup already exported `GOOGLE_CLOUD_PROJECT` and `REGISTRY_AGENT`, so nothing else is needed:
+
 ```bash
-export GOOGLE_CLOUD_LOCATION=global
 go run ./examples/agentregistry/a2a/
 ```
 
