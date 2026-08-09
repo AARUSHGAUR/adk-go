@@ -16,9 +16,10 @@
 // A2A, resolves that same agent back out of the registry, and exchanges a
 // message with it.
 //
-// One process plays both roles so the loop runs in one terminal. In production
-// they are separate deployments, and only the publishing half moves — the
-// consuming half below is what any caller writes.
+// One process plays both roles so the loop runs in one terminal: it publishes
+// the agent, then consumes it through the registry. In production those are
+// separate programs, and the consuming code below is unchanged — it is what any
+// caller writes.
 package main
 
 import (
@@ -58,7 +59,7 @@ func main() {
 	// Must match the URL in the card that was registered.
 	addr := cmp.Or(os.Getenv("A2A_ADDR"), "localhost:8765")
 
-	// Publisher half.
+	// Publishing: in production this is the agent owner's deployment.
 	srv, err := serve(addr)
 	if err != nil {
 		log.Fatalf("Failed to start the A2A server: %v", err)
@@ -66,7 +67,7 @@ func main() {
 	defer func() { _ = srv.Close() }()
 	log.Printf("Serving an agent over A2A at http://%s", addr)
 
-	// Consumer half: everything below only knows the registry resource name.
+	// Consuming: everything below knows only the registry resource name.
 	client, err := agentregistry.New(ctx, agentregistry.Config{
 		ProjectID: project,
 		Location:  location,

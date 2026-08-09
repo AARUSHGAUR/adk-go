@@ -12,10 +12,10 @@ Show the fact that surprises people first: **the registry is a catalog, not a pr
 
 The sample plays both roles in one process so it runs in one terminal:
 
-- the **publisher** serves an agent over A2A at that address,
-- the **consumer** knows only a registry resource name, and gets the URL, the transport, and the agent's identity from the catalog.
+- as **publisher** it serves an agent over A2A at that address,
+- as **consumer** it knows only a registry resource name, and gets the URL, the transport, and the agent's identity from the catalog.
 
-In production those are separate deployments. Only the publisher half moves; the consumer half is exactly what any caller writes.
+In production these are separate programs. The consuming code is unchanged — it is what any caller writes; the publishing code is what the agent's owner deploys.
 
 ## Workflow
 
@@ -24,7 +24,7 @@ sequenceDiagram
     autonumber
     actor You as You
     participant AR as Agent Registry
-    participant Main as main()<br/>consumer half
+    participant Main as main()
     participant Srv as A2A server<br/>localhost:8765
     participant Echo as registry_echo<br/>(your agent)
 
@@ -52,7 +52,7 @@ sequenceDiagram
     end
 ```
 
-The right-hand pair is the same agent seen twice: `registry_echo` is what this process publishes, and `registry_echo` is the name the consumer half learns from the catalog. The message text is what makes the loop legible — it leaves `main()`, reaches your `agent.New` as `UserContent`, and comes back prefixed.
+`main()` appears once because it is one process: step 3 is it publishing, steps 4-9 are it consuming. And `registry_echo` is the same agent seen twice — the name this process serves under, and the name that comes back out of the catalog at resolve time. The message text is what makes the loop legible: it leaves `main()`, reaches your `agent.New` as `UserContent`, and comes back prefixed.
 
 ## Setup
 
