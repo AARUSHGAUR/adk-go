@@ -145,6 +145,32 @@ func TestEdgeBuilder_AddRoutesSortsByRoute(t *testing.T) {
 	}
 }
 
+func TestEdgeBuilder_AddRoutesSortsBytewise(t *testing.T) {
+	// Keys and target names chosen so byte order differs from numeric,
+	// case-folded and by-target-name order; each of those would otherwise
+	// satisfy TestEdgeBuilder_AddRoutesSortsByRoute.
+	routes := map[string]Node{
+		"2":     newDummyNode("d"),
+		"10":    newDummyNode("c"),
+		"Beta":  newDummyNode("b"),
+		"alpha": newDummyNode("a"),
+	}
+
+	edges := NewEdgeBuilder().AddRoutes(newDummyNode("router"), routes).Build()
+
+	got := make([]string, len(edges))
+	for i, e := range edges {
+		route, ok := e.Route.(StringRoute)
+		if !ok {
+			t.Fatalf("edge %d route = %T, want StringRoute", i, e.Route)
+		}
+		got[i] = string(route)
+	}
+	if want := []string{"10", "2", "Beta", "alpha"}; !slices.Equal(got, want) {
+		t.Errorf("route order = %v, want %v", got, want)
+	}
+}
+
 // dummyNode is a minimal implementation of Node for testing purposes.
 type dummyNode struct {
 	BaseNode

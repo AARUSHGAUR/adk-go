@@ -36,8 +36,8 @@ func (b *EdgeBuilder) Add(from, to Node) *EdgeBuilder {
 }
 
 // AddRoute adds a new edge with a route condition between two nodes.
-// The route condition is of type any and is converted to a Route interface.
-// Supported routes are StringRoute, IntRoute, BoolRoute and MultiRoute.
+// route may be [StringRoute], [IntRoute], [BoolRoute], [MultiRoute], or
+// [Default] — the edge taken when no concrete route matched.
 func (b *EdgeBuilder) AddRoute(from, to Node, route Route) *EdgeBuilder {
 	b.edges = append(b.edges, Edge{From: from, To: to, Route: route})
 	return b
@@ -61,12 +61,11 @@ func (b *EdgeBuilder) AddFanIn(to Node, from ...Node) *EdgeBuilder {
 
 // AddRoutes adds multiple edges from a single source node to multiple target nodes with different route conditions.
 //
-// Edges are added sorted by route, in Go string order (so "10" sorts before
-// "2"). A Go map has no order of its own, so without this the graph would be
-// built differently on every run, and edge order is observable: it drives the
-// order successors are started in, and the pending queue under
-// [WithMaxConcurrency]. Call [EdgeBuilder.AddRoute] per route to choose the
-// order yourself, or to add a [Default] edge, which AddRoutes cannot express.
+// Edges are added in byte-wise lexicographic order of the route key, so "10"
+// precedes "2". That order is observable: it drives the order successors are
+// started in, and the pending queue under [WithMaxConcurrency]. Call
+// [EdgeBuilder.AddRoute] per route to choose the order yourself, or to add a
+// [Default] edge, which AddRoutes cannot express.
 func (b *EdgeBuilder) AddRoutes(from Node, routes map[string]Node) *EdgeBuilder {
 	for _, route := range slices.Sorted(maps.Keys(routes)) {
 		b.AddRoute(from, routes[route], StringRoute(route))
