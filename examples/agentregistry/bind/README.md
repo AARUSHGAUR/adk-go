@@ -59,7 +59,7 @@ export GOOGLE_CLOUD_REGION=us-central1
 go run ./examples/agentregistry/bind/ console
 ```
 
-No resource names to paste: the default capability is `deploy_service_from_image`, which any project with the Cloud Run API enabled already provides.
+No resource names to paste: the default capability is `list_log_names`, which any project with the Cloud Logging API enabled already provides, and which reads rather than writes.
 
 | Variable | Required | Meaning |
 |---|---|---|
@@ -68,7 +68,7 @@ No resource names to paste: the default capability is `deploy_service_from_image
 | `GOOGLE_GENAI_USE_VERTEXAI` | no | `1`/`true` uses Vertex AI instead of an API key |
 | `GOOGLE_CLOUD_REGION` | no | Vertex AI region; genai reads it, the registry does not |
 | `GOOGLE_CLOUD_LOCATION` | no | Registry location, defaults to `global` — **genai reads it too**, and it wins over `GOOGLE_CLOUD_REGION`, so a regional value moves the catalog lookup as well |
-| `REGISTRY_TOOL` | no | Capability to look for, defaults to `deploy_service_from_image` |
+| `REGISTRY_TOOL` | no | Capability to look for, defaults to `list_log_names` |
 
 `console` is the default; the launcher also serves `web api`, `web a2a` and `web webui`. An unrecognised argument prints the full command-line syntax.
 
@@ -78,16 +78,22 @@ Real output. The default capability resolves to one provider, and the tools it b
 
 ```text
 $ go run ./examples/agentregistry/bind/ console
-Tool "deploy_service_from_image" is provided by "run.googleapis.com" (projects/my-project/locations/global/mcpServers/agentregistry-00000000-0000-0000-76f4-702f82fb93ff)
+Tool "list_log_names" is provided by "logging.googleapis.com" (projects/my-project/locations/global/mcpServers/agentregistry-00000000-0000-0000-079a-e59aa1097d4d)
 
-User -> List the Cloud Run services in project my-project, region us-central1. Say which tool you used.
-Agent -> I used the **`list_services`** tool.
-
-         There are no Cloud Run services found in project `my-project` for region
-         `us-central1`.
+User -> In project my-project: list the kinds of logs and the log buckets, one line each, no extra detail. Say which tools you used.
+Agent -> Kinds of logs:
+         projects/my-project/logs/abuseevent.googleapis.com%2Fabuse_events
+         projects/my-project/logs/cloudaudit.googleapis.com%2Factivity
+         projects/my-project/logs/cloudaudit.googleapis.com%2Fdata_access
+         Log buckets:
+         projects/my-project/locations/global/buckets/_Default
+         projects/my-project/locations/global/buckets/_Required
+         Tools used:
+         list_log_names
+         list_buckets
 ```
 
-Asking for a deploy capability and then listing services is the point: you bind a *provider*, and get everything it serves. `list_services` was never named in the code or the environment.
+Both halves of the claim are in that one answer. `list_log_names` is the capability we asked for, so binding by capability did what it says. `list_buckets` appears nowhere in the code or the environment — it came along because you bind a *provider*, and get everything it serves. Name the project in the prompt: a smaller model will otherwise leave it out of the tool call and the API rejects it.
 
 Ask for a generic capability and the ambiguity is reported rather than hidden:
 

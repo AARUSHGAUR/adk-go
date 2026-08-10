@@ -50,10 +50,10 @@ func main() {
 		log.Fatal("GOOGLE_CLOUD_PROJECT must be set")
 	}
 	location := cmp.Or(os.Getenv("GOOGLE_CLOUD_LOCATION"), "global")
-	// Enabling the Cloud Run API auto-registers a server declaring this tool, so
-	// the default works without registering anything. Prefer a distinctive name:
-	// a generic one like "list_services" is declared by several servers.
-	want := cmp.Or(os.Getenv("REGISTRY_TOOL"), "deploy_service_from_image")
+	// Enabling the Cloud Logging API auto-registers a server declaring this tool,
+	// so the default works without registering anything. Prefer a distinctive
+	// name: a generic one like "list_services" is declared by several servers.
+	want := cmp.Or(os.Getenv("REGISTRY_TOOL"), "list_log_names")
 
 	client, err := agentregistry.New(ctx, agentregistry.Config{
 		ProjectID: project,
