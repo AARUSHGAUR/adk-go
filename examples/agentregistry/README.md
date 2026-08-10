@@ -20,7 +20,7 @@ export GOOGLE_CLOUD_PROJECT=your-project
 
 You probably don't have to register anything to try the samples: enabling a supported Google Cloud API auto-registers its **remote MCP server** in your registry. A fresh project typically already lists `run.googleapis.com`, `logging.googleapis.com`, `compute.googleapis.com`, and friends — all of which `bind` can consume as-is.
 
-The client authenticates with ADC and bills the quota project (`GOOGLE_CLOUD_QUOTA_PROJECT`, the credentials' `quota_project_id`, then `GOOGLE_CLOUD_PROJECT`, in that order). `gcloud` picks its quota project separately, so pass `--billing-project` to it or an unrelated default can deny the call with `USER_PROJECT_DENIED`.
+The client authenticates with ADC and bills the quota project (`GOOGLE_CLOUD_QUOTA_PROJECT`, then the credentials' `quota_project_id` on the ADC path, then `Config.ProjectID` — which these samples take from `GOOGLE_CLOUD_PROJECT`). `gcloud` picks its quota project separately, so pass `--billing-project` to it or an unrelated default can deny the call with `USER_PROJECT_DENIED`.
 
 To see what is registered without running any Go code:
 
@@ -33,7 +33,7 @@ Reference: [Agent Registry overview](https://docs.cloud.google.com/agent-registr
 
 ### If you get `403 PERMISSION_DENIED`
 
-Check which project you are actually hitting — `echo $GOOGLE_CLOUD_PROJECT`. A shell profile or a previous `gcloud config set` often leaves a default pointing at a project without the API enabled or without the viewer role, and the samples print the project they used on their first line:
+Check which project you are actually hitting — `echo $GOOGLE_CLOUD_PROJECT`. A shell profile or a previous `gcloud config set` often leaves a default pointing at a project without the API enabled or without the viewer role, and the resource in the error names the project the call actually went to:
 
 ```text
 Failed to list agents: HTTP 403 — PERMISSION_DENIED: Permission 'agentregistry.agents.list'
@@ -92,7 +92,7 @@ gcloud agent-registry services describe my-agent \
 
 Three traps worth knowing before you spend an afternoon on them:
 
-- **Use `--agent-spec-type=a2a-agent-card`, not `no-spec`.** `RemoteAgent` looks for a protocol of type `A2A_AGENT`. `no-spec` registers a `CUSTOM` protocol instead, and resolution fails with `A2A connection URI not found`.
+- **Use `--agent-spec-type=a2a-agent-card`, not `no-spec`.** `a2a-agent-card` embeds the card `RemoteAgent` reads. `no-spec` leaves the record with neither a card nor an `A2A_AGENT` protocol, so resolution falls through to the protocol lookup and fails with `A2A connection URI not found`.
 - **The card's `skills` must be non-empty**, each with `id`/`name`/`description`/`tags`, or the create call is rejected.
 - **The card's `protocolBinding` must match how your server actually serves** — `HTTP+JSON` for `a2asrv.NewRESTHandler`, `JSONRPC` for `a2asrv.NewJSONRPCHandler`. A mismatch only shows up as an empty reply at the first message. (The registry stores the binding as `HTTP_JSON`; the client maps that to A2A's `HTTP+JSON`. Both spellings are correct in their own domain.)
 

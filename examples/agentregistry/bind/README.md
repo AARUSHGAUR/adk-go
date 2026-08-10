@@ -1,6 +1,6 @@
 # Binding an agent to a capability
 
-Build a running `LlmAgent` without knowing a single endpoint. You name the **tool you need**; the registry decides which MCP server provides it, and the sample binds that server at startup.
+Build a running `LlmAgent` without knowing a single endpoint. You name the **tool you need**; the registry decides which MCP server provides it, and the sample resolves that server into a toolset at startup.
 
 - **Concept:** search the catalog's tool metadata, then `Client.MCPToolset` the winner.
 - **Needs LLM?** Yes
@@ -39,7 +39,7 @@ graph LR
 
 1. Scan the catalog for every server whose declared `Tools` include the wanted name.
 2. Take the first, logging any others so a surprising pick is visible.
-3. `MCPToolset` the winner, hand it to `llmagent.New`, serve through the launcher.
+3. `MCPToolset` the winner, hand it to `llmagent.New`, serve through the launcher. That resolves the endpoint; the MCP session opens on the first model turn.
 
 The live tool set comes from the MCP server itself once connected — the catalog metadata is only used to *choose*.
 
@@ -50,9 +50,11 @@ export GOOGLE_CLOUD_PROJECT=your-project
 
 # Model credentials: a Gemini API key...
 export GOOGLE_API_KEY=...
-# ...or Vertex AI, which needs a location of its own
+# ...or Vertex AI, which needs a region. Set GOOGLE_CLOUD_REGION rather than
+# GOOGLE_CLOUD_LOCATION: genai falls back to it, and the registry never reads
+# it, so the catalog lookup stays in `global`.
 export GOOGLE_GENAI_USE_VERTEXAI=true
-export GOOGLE_CLOUD_LOCATION=global
+export GOOGLE_CLOUD_REGION=us-central1
 
 go run ./examples/agentregistry/bind/ console
 ```
@@ -62,10 +64,13 @@ No resource names to paste: the default capability is `deploy_service_from_image
 | Variable | Required | Meaning |
 |---|---|---|
 | `GOOGLE_CLOUD_PROJECT` | yes | Project whose registry is searched |
-| `GOOGLE_CLOUD_LOCATION` | no | Registry location, defaults to `global` |
+| `GOOGLE_API_KEY` | yes, unless using Vertex AI | Gemini API key for the model |
+| `GOOGLE_GENAI_USE_VERTEXAI` | no | `1`/`true` uses Vertex AI instead of an API key |
+| `GOOGLE_CLOUD_REGION` | no | Vertex AI region; genai reads it, the registry does not |
+| `GOOGLE_CLOUD_LOCATION` | no | Registry location, defaults to `global` — **genai reads it too**, and it wins over `GOOGLE_CLOUD_REGION`, so a regional value moves the catalog lookup as well |
 | `REGISTRY_TOOL` | no | Capability to look for, defaults to `deploy_service_from_image` |
 
-The launcher also serves `restapi`, `a2a`, and `webui`; run with `help` to see the options.
+`console` is the default; the launcher also serves `web api`, `web a2a` and `web webui`. An unrecognised argument prints the full command-line syntax.
 
 ## Example session
 
@@ -92,12 +97,14 @@ $ REGISTRY_TOOL=list_services go run ./examples/agentregistry/bind/ console
 Tool "list_services" is provided by "agentregistry.googleapis.com" (projects/my-project/locations/global/mcpServers/agentregistry-00000000-0000-0000-7ea4-5846298719d4)
 ```
 
-Ask for one nobody provides, and you find out before an agent exists:
+Ask for one nobody provides, and you find out before an agent exists. The message
+names the location it searched, because that is the other way this fails — a
+`GOOGLE_CLOUD_LOCATION` meant for the model points the catalog somewhere empty:
 
 ```text
 $ REGISTRY_TOOL=send_carrier_pigeon go run ./examples/agentregistry/bind/ console
-Failed to find a provider for "send_carrier_pigeon": no registered MCP server
-declares it; run the discover sample to see what is available
+Failed to find a provider for "send_carrier_pigeon" in projects/my-project/locations/global:
+no registered MCP server declares this tool; run the discover sample to see what is available
 ```
 
 At no point does the sample contain an endpoint URL, a tool schema, or a token.

@@ -33,6 +33,8 @@ import (
 
 func main() {
 	ctx := context.Background()
+	// Output here is a transcript, not a log: the timestamp prefix is noise.
+	log.SetFlags(0)
 
 	project := os.Getenv("GOOGLE_CLOUD_PROJECT")
 	if project == "" {
@@ -65,7 +67,7 @@ func main() {
 				detail:      summary("skills", skillNames(a.Skills)),
 			}
 		}); err != nil {
-		log.Fatalf("Failed to list agents: %v", explain(err))
+		log.Fatalf("Failed to list agents: %s", explain(err))
 	}
 
 	if err := printAll("MCP servers", client.AllMCPServers(ctx, opts...),
@@ -76,7 +78,7 @@ func main() {
 				detail:      summary("tools", toolNames(s.Tools)),
 			}
 		}); err != nil {
-		log.Fatalf("Failed to list MCP servers: %v", explain(err))
+		log.Fatalf("Failed to list MCP servers: %s", explain(err))
 	}
 
 	if err := printAll("Model endpoints", client.AllEndpoints(ctx, opts...),
@@ -87,7 +89,7 @@ func main() {
 				detail:      endpointURL(e),
 			}
 		}); err != nil {
-		log.Fatalf("Failed to list endpoints: %v", explain(err))
+		log.Fatalf("Failed to list endpoints: %s", explain(err))
 	}
 }
 
@@ -132,8 +134,7 @@ func skillNames(skills []agentregistry.Skill) []string {
 	return names
 }
 
-// toolNames returns the tools the registry declares for an MCP server. The live
-// tool set is whatever the server reports over MCP once a toolset connects.
+// toolNames returns the names the registry declares for an MCP server's tools.
 func toolNames(tools []agentregistry.Tool) []string {
 	names := make([]string, 0, len(tools))
 	for _, t := range tools {
@@ -151,13 +152,16 @@ func endpointURL(e *agentregistry.Endpoint) string {
 	return ""
 }
 
-// explain condenses a registry failure into something a human can act on. The
+// explain renders a registry failure as something a human can act on. The
 // service reports a denial as a screenful of JSON, so unwrap the typed
 // [agentregistry.APIError] and keep the parts that identify the fix.
-func explain(err error) error {
+//
+// It returns text, not an error: wrapping the result back into one with %w
+// would re-append the envelope it exists to suppress.
+func explain(err error) string {
 	var apiErr *agentregistry.APIError
 	if !errors.As(err, &apiErr) {
-		return err
+		return err.Error()
 	}
 	var envelope struct {
 		Error struct {
@@ -167,12 +171,15 @@ func explain(err error) error {
 	}
 	detail := apiErr.Body
 	if json.Unmarshal([]byte(apiErr.Body), &envelope) == nil && envelope.Error.Message != "" {
-		detail = fmt.Sprintf("%s: %s", envelope.Error.Status, envelope.Error.Message)
+		detail = envelope.Error.Message
+		if envelope.Error.Status != "" {
+			detail = envelope.Error.Status + ": " + detail
+		}
 	}
 	if apiErr.StatusCode == http.StatusForbidden {
 		detail += "\nGrant roles/agentregistry.viewer on this project, or point GOOGLE_CLOUD_PROJECT at one where you have it."
 	}
-	return fmt.Errorf("HTTP %d — %s", apiErr.StatusCode, detail)
+	return fmt.Sprintf("HTTP %d — %s", apiErr.StatusCode, detail)
 }
 
 // summary renders "label (n): a, b, c". The count is always exact, and the tail

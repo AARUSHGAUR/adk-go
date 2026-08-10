@@ -42,6 +42,8 @@ import (
 
 func main() {
 	ctx := context.Background()
+	// Output here is a transcript, not a log: the timestamp prefix is noise.
+	log.SetFlags(0)
 
 	project := os.Getenv("GOOGLE_CLOUD_PROJECT")
 	if project == "" {
@@ -63,19 +65,23 @@ func main() {
 
 	server, err := pickProvider(ctx, client, want)
 	if err != nil {
-		log.Fatalf("Failed to find a provider for %q: %v", want, explain(err))
+		// Name the location: GOOGLE_CLOUD_LOCATION also steers the catalog, so a
+		// region meant for the model reads as "nobody provides it".
+		log.Fatalf("Failed to find a provider for %q in projects/%s/locations/%s: %s", want, project, location, explain(err))
 	}
-	log.Printf("Tool %q is provided by %q (%s)", want, server.DisplayName, server.Name)
+	log.Printf("Tool %q is provided by %q (%s)", want, cmp.Or(server.DisplayName, server.Name), server.Name)
 
 	// Requests to *.googleapis.com endpoints reuse the registry's credentials;
-	// anything else needs WithMCPHTTPClient/WithMCPHeaders.
+	// anything else gets http.DefaultClient, so pass WithMCPHTTPClient or
+	// WithMCPHeaders when it needs credentials. This resolves the endpoint only:
+	// the MCP session opens on the first model turn.
 	toolset, err := client.MCPToolset(ctx, server.Name)
 	if err != nil {
-		log.Fatalf("Failed to connect to MCP server %q: %v", server.Name, err)
+		log.Fatalf("Failed to build a toolset for MCP server %q: %s", server.Name, explain(err))
 	}
 
 	// The empty config resolves the backend from the environment: a Gemini API
-	// key, or Vertex AI when GOOGLE_GENAI_USE_VERTEXAI is set.
+	// key, or Vertex AI when GOOGLE_GENAI_USE_VERTEXAI is "1" or "true".
 	m, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{})
 	if err != nil {
 		log.Fatalf("Failed to create the model: %v", err)
@@ -102,13 +108,16 @@ func main() {
 	}
 }
 
-// explain condenses a registry failure into something a human can act on. The
+// explain renders a registry failure as something a human can act on. The
 // service reports a denial as a screenful of JSON, so unwrap the typed
 // [agentregistry.APIError] and keep the parts that identify the fix.
-func explain(err error) error {
+//
+// It returns text, not an error: wrapping the result back into one with %w
+// would re-append the envelope it exists to suppress.
+func explain(err error) string {
 	var apiErr *agentregistry.APIError
 	if !errors.As(err, &apiErr) {
-		return err
+		return err.Error()
 	}
 	var envelope struct {
 		Error struct {
@@ -118,12 +127,15 @@ func explain(err error) error {
 	}
 	detail := apiErr.Body
 	if json.Unmarshal([]byte(apiErr.Body), &envelope) == nil && envelope.Error.Message != "" {
-		detail = fmt.Sprintf("%s: %s", envelope.Error.Status, envelope.Error.Message)
+		detail = envelope.Error.Message
+		if envelope.Error.Status != "" {
+			detail = envelope.Error.Status + ": " + detail
+		}
 	}
 	if apiErr.StatusCode == http.StatusForbidden {
 		detail += "\nGrant roles/agentregistry.viewer on this project, or point GOOGLE_CLOUD_PROJECT at one where you have it."
 	}
-	return fmt.Errorf("HTTP %d — %s", apiErr.StatusCode, detail)
+	return fmt.Sprintf("HTTP %d — %s", apiErr.StatusCode, detail)
 }
 
 // pickProvider resolves a capability to the MCP server that will serve it, by
@@ -147,12 +159,12 @@ func pickProvider(ctx context.Context, c *agentregistry.Client, name string) (*a
 		}
 	}
 	if len(matches) == 0 {
-		return nil, fmt.Errorf("no registered MCP server declares it; run the discover sample to see what is available")
+		return nil, errors.New("no registered MCP server declares this tool; run the discover sample to see what is available")
 	}
 	if len(matches) > 1 {
 		others := make([]string, 0, len(matches)-1)
 		for _, m := range matches[1:] {
-			others = append(others, m.DisplayName)
+			others = append(others, cmp.Or(m.DisplayName, m.Name))
 		}
 		log.Printf("%q is also declared by %s", name, strings.Join(others, ", "))
 	}
