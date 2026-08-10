@@ -40,4 +40,10 @@ jobs:
         run: go install golang.org/x/exp/cmd/apidiff@v0.0.0-20250911091902-df9299821621
 
       - name: Compare the exported API against the base branch
-        run: .github/scripts/apidiff.sh origin/${{ github.base_ref }}
+        # The ref goes through the environment rather than being interpolated
+        # into the command. A ${{ }} expansion inside run: is substituted into
+        # the shell text before the shell sees it, so anything controllable in
+        # the value becomes code; passing it as a quoted variable keeps it data.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: .github/scripts/apidiff.sh "origin/$BASE_REF"
