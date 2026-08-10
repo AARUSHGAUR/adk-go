@@ -15,8 +15,10 @@
 package compactioninternal
 
 import (
-	"slices"
+	"fmt"
 	"time"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
@@ -36,6 +38,13 @@ import (
 // tells the caller to skip this compaction rather than strand a half-finished
 // tool interaction. Without this, a summary could swallow a function call while
 // leaving its response behind, which downstream prompt assembly rejects.
+//
+// The prefix is additionally pulled back off a timestamp tie. Compaction
+// coverage is an inclusive timestamp range, so if the first excluded event
+// shares a timestamp with the last included one, it would fall inside the
+// summarized range without having been summarized, and disappear from the
+// prompt. Cutting before the whole tied group keeps "summarized" and "covered"
+// the same set.
 func longestSelfContainedPrefix(events []*session.Event) []*session.Event {
 	openIDs := make(map[string]struct{})
 	safeLength := 0
@@ -44,9 +53,7 @@ func longestSelfContainedPrefix(events []*session.Event) []*session.Event {
 			delete(openIDs, resp.ID)
 		}
 		for _, call := range utils.FunctionCalls(utils.Content(ev)) {
-			if call.ID != "" {
-				openIDs[call.ID] = struct{}{}
-			}
+			openIDs[callObligationKey(call, i)] = struct{}{}
 		}
 		for id := range ev.Actions.RequestedToolConfirmations {
 			openIDs[id] = struct{}{}
@@ -57,7 +64,36 @@ func longestSelfContainedPrefix(events []*session.Event) []*session.Event {
 			safeLength = i + 1
 		}
 	}
-	return events[:safeLength]
+	return events[:trimToTimestampBoundary(events, safeLength)]
+}
+
+// callObligationKey returns the key a function call is tracked under while
+// waiting for its response.
+//
+// An ID-less call gets a synthetic key that no response can match, so it stays
+// open forever and the prefix is cut before it. FunctionCall.ID is optional and
+// some providers omit it, and keying such a call on "" would let a single
+// unrelated ID-less response close it, or -- worse, and what the earlier
+// implementation did -- skip it entirely so the trim that protects every other
+// call silently never fires. Refusing to summarize is the safe direction.
+func callObligationKey(call *genai.FunctionCall, eventIndex int) string {
+	if call.ID != "" {
+		return call.ID
+	}
+	return fmt.Sprintf("\x00no-id\x00%d\x00%s", eventIndex, call.Name)
+}
+
+// trimToTimestampBoundary pulls length back so the cut does not fall inside a
+// group of events sharing a timestamp.
+func trimToTimestampBoundary(events []*session.Event, length int) int {
+	if length <= 0 || length >= len(events) {
+		return length
+	}
+	boundary := events[length].Timestamp
+	for length > 0 && !events[length-1].Timestamp.Before(boundary) {
+		length--
+	}
+	return length
 }
 
 // LatestCompactionEvent returns the newest compaction event in events that no
@@ -105,70 +141,138 @@ func isCompactionSubsumed(i int, rng *session.EventCompaction, events []*session
 // selectSlidingWindow returns the events a sliding-window compaction should
 // summarize, or nil when there is nothing to compact yet.
 //
-// It walks events newest to oldest, accumulating distinct invocation IDs of
-// non-compaction events. Once it crosses the most recent compaction boundary
-// with at least interval new invocations behind it, it keeps going for up to
-// overlap further invocations so consecutive summaries share context, then
-// stops. The window is returned in chronological order, trimmed by
-// longestSelfContainedPrefix.
+// The window is a *contiguous slice* of the event list, from the first event of
+// the oldest invocation being compacted through the last event of the newest.
+// Contiguity is the point: compaction coverage is recorded as an inclusive
+// timestamp range, and the prompt builder drops every event inside that range.
+// Building the window by filtering instead would let an event be skipped by the
+// filter yet still fall inside the range, so it would be dropped from the
+// prompt without ever having been summarized. Slicing makes that unexpressible.
+//
+// Which invocations to cover is decided first, then the slice is taken. An
+// invocation counts as new when it has any event after the most recent
+// compaction boundary. Once interval new invocations exist, the window reaches
+// back overlap further invocations so consecutive summaries share context.
 //
 // nil comes back when fewer than interval new invocations exist, or when the
-// selected window has no self-contained prefix.
+// slice has no self-contained prefix left after trimming.
 func selectSlidingWindow(events []*session.Event, interval, overlap int) []*session.Event {
 	if interval <= 0 {
 		return nil
 	}
 
-	var window []*session.Event
-	seen := make(map[string]struct{})
+	// The boundary of the newest compaction already recorded. Everything at or
+	// before it has been summarized once already.
 	var lastCompactEnd time.Time
-	targetSize := -1
-
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
-
-		// hasCompaction, not IsCompactionEvent: an event that declares a
-		// compaction but carries no usable content is still bookkeeping, never
-		// conversation. Counting it as a real invocation would skew the window.
+	for _, ev := range events {
 		if hasCompaction(ev) {
 			if end := ev.Actions.Compaction.EndTimestamp; end.After(lastCompactEnd) {
 				lastCompactEnd = end
 			}
-			continue
 		}
-		if ev.InvocationID == "" {
-			continue
-		}
-		if _, ok := seen[ev.InvocationID]; ok {
-			window = append(window, ev)
-			continue
-		}
+	}
 
-		// Crossing the most recent compaction boundary. Either enough new
-		// invocations have accumulated and we keep going for `overlap` more, or
-		// they have not and there is nothing to do.
-		if !ev.Timestamp.After(lastCompactEnd) {
-			if len(seen) < interval {
-				break
-			}
-			if targetSize < 0 {
-				targetSize = len(seen) + overlap
-			}
+	// Invocations in first-seen order, and whether each has any event past the
+	// boundary. hasCompaction rather than IsCompactionEvent: an event declaring
+	// a compaction is bookkeeping even when its content is unusable, and must
+	// never be counted as a conversational invocation.
+	var order []string
+	isNew := make(map[string]bool)
+	for _, ev := range events {
+		if hasCompaction(ev) || ev.InvocationID == "" {
+			continue
 		}
-		if targetSize >= 0 && len(seen) >= targetSize {
-			break
+		if _, ok := isNew[ev.InvocationID]; !ok {
+			order = append(order, ev.InvocationID)
+			isNew[ev.InvocationID] = false
+		}
+		if ev.Timestamp.After(lastCompactEnd) {
+			isNew[ev.InvocationID] = true
+		}
+	}
+
+	firstNew := -1
+	newCount := 0
+	for i, id := range order {
+		if isNew[id] {
+			if firstNew < 0 {
+				firstNew = i
+			}
+			newCount++
+		}
+	}
+	if firstNew < 0 || newCount < interval {
+		return nil
+	}
+
+	startID := order[max(0, firstNew-overlap)]
+	endID := order[len(order)-1]
+
+	// Slice from the first event of startID through the last of endID. Events
+	// in between are included whatever they are, including ones with no
+	// invocation ID, which is exactly the contiguity the range model needs.
+	first, last := -1, -1
+	for i, ev := range events {
+		if hasCompaction(ev) {
+			continue
+		}
+		if first < 0 && ev.InvocationID == startID {
+			first = i
+		}
+		if ev.InvocationID == endID {
+			last = i
+		}
+	}
+	if first < 0 || last < first {
+		return nil
+	}
+
+	window := make([]*session.Event, 0, last-first+1)
+	for _, ev := range events[first : last+1] {
+		// Prior summaries are bookkeeping, not conversation, and are the only
+		// thing dropped from the slice. They are never re-summarized, so a
+		// sliding-window compaction is a constant-factor reduction rather than
+		// a bound; the tail-retention strategy is what bounds prompt growth.
+		if hasCompaction(ev) {
+			continue
 		}
 		window = append(window, ev)
-		seen[ev.InvocationID] = struct{}{}
 	}
 
-	if len(seen) < interval {
-		return nil
+	if trimmed := longestSelfContainedPrefix(window); len(trimmed) > 0 {
+		return trimmed
 	}
-	slices.Reverse(window)
-	window = longestSelfContainedPrefix(window)
-	if len(window) == 0 {
-		return nil
+	return skipBlockedHead(window)
+}
+
+// skipBlockedHead handles a window whose very first events hold a function call
+// that never got a response, which leaves no self-contained prefix at all.
+//
+// A tool awaiting human approval, or one whose backend died, blocks the head of
+// the window permanently. Because the window is anchored to the last compaction
+// boundary, that call stays at the head on every later attempt, so compaction
+// would stop for the rest of the session and, since "no prefix" and "not enough
+// invocations yet" both come back as nil, do so silently. Long tool-using
+// sessions are exactly the ones compaction exists for.
+//
+// So instead of giving up, step past the blocked head and summarize the longest
+// self-contained run that follows. The blocked call and everything before it
+// stay raw and visible, which is what a pending call needs anyway. The summary
+// is a contiguous later range, so the coverage invariant still holds.
+//
+// nil still comes back when nothing after the blockage is self-contained
+// either.
+func skipBlockedHead(window []*session.Event) []*session.Event {
+	for start := 1; start < len(window); start++ {
+		// Only resume just after an event that opened an obligation, so the
+		// scan is over blockage points rather than every offset.
+		prev := window[start-1]
+		if len(utils.FunctionCalls(utils.Content(prev))) == 0 && len(prev.Actions.RequestedToolConfirmations) == 0 {
+			continue
+		}
+		if tail := longestSelfContainedPrefix(window[start:]); len(tail) > 0 {
+			return tail
+		}
 	}
-	return window
+	return nil
 }

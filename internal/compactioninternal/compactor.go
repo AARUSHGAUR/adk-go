@@ -65,6 +65,15 @@ func SlidingWindow(ctx context.Context, cfg *compaction.Config, sess session.Ses
 	if err != nil {
 		return nil, fmt.Errorf("sliding-window summarization failed: %w", err)
 	}
+	if summary == nil {
+		return nil, nil
+	}
+	// A Summarizer is third-party code. One that returns an ordinary event
+	// instead of a compaction record would otherwise be appended verbatim,
+	// adding a conversational turn while compacting nothing.
+	if !compaction.IsCompactionEvent(summary) {
+		return nil, fmt.Errorf("summarizer returned an event carrying no compaction record")
+	}
 	return stamp(ctx, summary), nil
 }
 

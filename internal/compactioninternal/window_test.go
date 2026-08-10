@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
@@ -396,5 +397,204 @@ func TestConfirmationEventOpensObligation(t *testing.T) {
 	}
 	if _, ok := any(ev.Actions.RequestedToolConfirmations["c1"]).(toolconfirmation.ToolConfirmation); !ok {
 		t.Fatal("RequestedToolConfirmations entry has an unexpected type")
+	}
+}
+
+// assertWindowCoversItsRange checks the invariant the interval model depends
+// on: the set of events a summary covers must equal the set it summarized.
+//
+// Coverage is recorded as an inclusive timestamp range and the prompt builder
+// drops everything inside it, so any event that falls in the range but is
+// missing from the window would be dropped without ever being summarized.
+func assertWindowCoversItsRange(t *testing.T, all, window []*session.Event) {
+	t.Helper()
+	if len(window) == 0 {
+		return
+	}
+	start, end := window[0].Timestamp, window[len(window)-1].Timestamp
+	inWindow := make(map[*session.Event]bool, len(window))
+	for _, ev := range window {
+		inWindow[ev] = true
+	}
+	for _, ev := range all {
+		if hasCompaction(ev) || inWindow[ev] {
+			continue
+		}
+		if !ev.Timestamp.Before(start) && !ev.Timestamp.After(end) {
+			t.Errorf("event %q at %v lies inside the summarized range [%v, %v] but was not summarized, so it would vanish from the prompt",
+				ev.ID, ev.Timestamp, start, end)
+		}
+	}
+}
+
+func TestSelectSlidingWindowCoversEverythingInItsRange(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		events []*session.Event
+	}{
+		{
+			name: "event with no invocation ID sits between two invocations",
+			events: []*session.Event{
+				textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
+				// Appended directly to the session rather than by an
+				// invocation, so it carries no invocation ID.
+				textEvent("orphan", "", 3, "side note"),
+				textEvent("c", "inv2", 4, "q2"), modelTextEvent("d", "inv2", 5, "a2"),
+			},
+		},
+		{
+			name: "several ID-less events interleaved",
+			events: []*session.Event{
+				textEvent("x", "", 1, "before"),
+				textEvent("a", "inv1", 2, "q1"),
+				textEvent("y", "", 3, "middle"),
+				modelTextEvent("b", "inv1", 4, "a1"),
+				textEvent("c", "inv2", 5, "q2"),
+				textEvent("z", "", 6, "later"),
+				modelTextEvent("d", "inv2", 7, "a2"),
+			},
+		},
+		{
+			name: "trim boundary lands on a timestamp tie",
+			events: []*session.Event{
+				textEvent("a", "inv1", 1, "q1"),
+				modelTextEvent("b", "inv1", 2, "a1"),
+				textEvent("c", "inv2", 3, "q2"),
+				// These three share a timestamp, and the open call forces a
+				// trim right in the middle of the group.
+				modelTextEvent("d", "inv2", 4, "a2"),
+				callEvent("e", "inv2", 4, "c1"),
+				modelTextEvent("f", "inv2", 4, "trailing"),
+			},
+		},
+		{
+			name: "overlap reaches back across an ID-less event",
+			events: []*session.Event{
+				textEvent("a", "inv1", 1, "q1"),
+				textEvent("orphan", "", 2, "side note"),
+				textEvent("b", "inv2", 3, "q2"),
+				compactionEvent("s1", 4, 1, 3, "earlier summary"),
+				textEvent("c", "inv3", 5, "q3"),
+				textEvent("d", "inv4", 6, "q4"),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for _, overlap := range []int{0, 1, 2} {
+				window := selectSlidingWindow(tc.events, 2, overlap)
+				assertWindowCoversItsRange(t, tc.events, window)
+			}
+		})
+	}
+}
+
+// TestSelectSlidingWindowIncludesIDlessEvents pins the specific behaviour the
+// invariant depends on, so a future refactor that starts filtering again fails
+// loudly rather than silently dropping events.
+func TestSelectSlidingWindowIncludesIDlessEvents(t *testing.T) {
+	t.Parallel()
+
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
+		textEvent("orphan", "", 3, "side note"),
+		textEvent("c", "inv2", 4, "q2"), modelTextEvent("d", "inv2", 5, "a2"),
+	}
+
+	got := ids(selectSlidingWindow(events, 2, 0))
+	if diff := cmp.Diff([]string{"a", "b", "orphan", "c", "d"}, got); diff != "" {
+		t.Errorf("selectSlidingWindow() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestSelectSlidingWindowSurvivesBlockedHead pins that a tool call which never
+// gets a response does not stop compaction for the rest of the session.
+//
+// The window is anchored to the last compaction boundary, so an unanswered call
+// at the head stays at the head forever. Returning nil there would silently
+// disable compaction on exactly the long tool-using sessions that need it.
+func TestSelectSlidingWindowSurvivesBlockedHead(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		events []*session.Event
+		want   []string
+	}{
+		{
+			name: "unanswered call at the head is stepped over",
+			events: []*session.Event{
+				// inv1 asks a tool something that never answers.
+				callEvent("stuck", "inv1", 1, "c1"),
+				textEvent("a", "inv2", 2, "q2"), modelTextEvent("b", "inv2", 3, "a2"),
+				textEvent("c", "inv3", 4, "q3"), modelTextEvent("d", "inv3", 5, "a3"),
+			},
+			want: []string{"a", "b", "c", "d"},
+		},
+		{
+			name: "unanswered confirmation at the head is stepped over",
+			events: []*session.Event{
+				confirmationEvent("stuck", "inv1", 1, "c1"),
+				textEvent("a", "inv2", 2, "q2"),
+				textEvent("b", "inv3", 3, "q3"),
+			},
+			want: []string{"a", "b"},
+		},
+		{
+			name: "still nil when nothing after the blockage is self-contained",
+			events: []*session.Event{
+				callEvent("stuck1", "inv1", 1, "c1"),
+				callEvent("stuck2", "inv2", 2, "c2"),
+			},
+			want: nil,
+		},
+		{
+			name: "a resolvable call is trimmed normally, not stepped over",
+			events: []*session.Event{
+				textEvent("a", "inv1", 1, "q1"),
+				modelTextEvent("b", "inv1", 2, "a1"),
+				textEvent("c", "inv2", 3, "q2"),
+				callEvent("pending", "inv2", 4, "c1"),
+			},
+			want: []string{"a", "b", "c"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			window := selectSlidingWindow(tc.events, 2, 0)
+			if diff := cmp.Diff(tc.want, ids(window)); diff != "" {
+				t.Errorf("selectSlidingWindow() mismatch (-want +got):\n%s", diff)
+			}
+			// Stepping past a blockage must not break the coverage invariant.
+			assertWindowCoversItsRange(t, tc.events, window)
+		})
+	}
+}
+
+// TestLongestSelfContainedPrefixIDlessCall pins that a call with no ID is
+// treated as an obligation. Pairing is keyed on the ID, which is optional, so
+// keying an ID-less call on "" would let the trim that protects every other
+// call silently not fire and split it from its response.
+func TestLongestSelfContainedPrefixIDlessCall(t *testing.T) {
+	t.Parallel()
+
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"),
+		newEvent("idless", "inv1", 2, "model", &genai.Part{
+			FunctionCall: &genai.FunctionCall{Name: "tool_without_id"},
+		}),
+		responseEvent("resp", "inv1", 3, ""),
+		modelTextEvent("d", "inv1", 4, "done"),
+	}
+
+	// The call must block the prefix rather than sail through it.
+	if diff := cmp.Diff([]string{"a"}, ids(longestSelfContainedPrefix(events))); diff != "" {
+		t.Errorf("longestSelfContainedPrefix() mismatch (-want +got):\n%s", diff)
 	}
 }

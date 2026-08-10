@@ -16,6 +16,7 @@ package sessiontestsuite
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -451,6 +452,65 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			}
 		})
 
+		t.Run("compaction_record_round_trips", func(t *testing.T) {
+			// A context-compaction summary carries its content only on
+			// Actions.Compaction: LLMResponse.Content is nil and there is no
+			// state or artifact delta. A backend that persists events by
+			// looking only at content or deltas drops it silently, and the
+			// session comes back with no summary and no record that compaction
+			// ran, so the same range is summarized and billed again on every
+			// later trigger.
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+
+			start := time.Now().UTC().Truncate(time.Millisecond)
+			end := start.Add(5 * time.Second)
+			event := &session.Event{
+				ID:           "compaction_event",
+				Author:       "user",
+				InvocationID: "inv-compaction",
+				Actions: session.EventActions{
+					Compaction: &session.EventCompaction{
+						StartTimestamp:   start,
+						EndTimestamp:     end,
+						CompactedContent: genai.NewContentFromText("summary of earlier turns", "model"),
+					},
+				},
+			}
+			if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+
+			got, err := s.Get(ctx, &session.GetRequest{
+				AppName:   testAppName,
+				UserID:    "user1",
+				SessionID: created.Session.ID(),
+			})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+
+			snap := Snapshot(got.Session)
+			if len(snap.Events) != 1 {
+				t.Fatalf("Expected 1 event, got %d", len(snap.Events))
+			}
+			c := snap.Events[0].Actions.Compaction
+			if c == nil {
+				t.Fatal("Actions.Compaction was not persisted, so the summary is unrecoverable")
+			}
+			if !c.StartTimestamp.Equal(start) || !c.EndTimestamp.Equal(end) {
+				t.Errorf("compaction range = [%v, %v], want [%v, %v]", c.StartTimestamp, c.EndTimestamp, start, end)
+			}
+			if got, want := textOf(c.CompactedContent), "summary of earlier turns"; got != want {
+				t.Errorf("compacted content = %q, want %q", got, want)
+			}
+		})
+
 		t.Run("partial_events_are_not_persisted", func(t *testing.T) {
 			s := setup(t)
 			ctx := t.Context()
@@ -750,3 +810,17 @@ func (m *mockSession) UserID() string            { return m.userID }
 func (m *mockSession) State() session.State      { return nil }
 func (m *mockSession) Events() session.Events    { return nil }
 func (m *mockSession) LastUpdateTime() time.Time { return time.Now() }
+
+// textOf concatenates the text parts of c.
+func textOf(c *genai.Content) string {
+	if c == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range c.Parts {
+		if p != nil {
+			b.WriteString(p.Text)
+		}
+	}
+	return b.String()
+}

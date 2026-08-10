@@ -119,26 +119,60 @@ func (s *LLMSummarizer) SummarizeEvents(ctx context.Context, events []*session.E
 		Contents: []*genai.Content{genai.NewContentFromText(prompt, genai.RoleUser)},
 	}
 
+	var finishReason genai.FinishReason
 	for resp, err := range s.model.GenerateContent(ctx, req, false) {
 		if err != nil {
 			return nil, fmt.Errorf("summarizer model call failed: %w", err)
 		}
-		if resp == nil || resp.Content == nil {
+		if resp == nil {
 			continue
 		}
-		summary, err := NewSummaryEvent(events, resp.Content, resp.UsageMetadata)
-		if err != nil {
-			return nil, err
+		if resp.FinishReason != "" {
+			finishReason = resp.FinishReason
 		}
-		return summary, nil
+		// Content non-nil is not enough. A response carrying an empty Parts
+		// slice is what a blocked, truncated or candidate-less generation looks
+		// like, and building a summary from it would record a compaction whose
+		// content says nothing: the covered turns would be dropped from the
+		// prompt and replaced by silence.
+		if !hasText(resp.Content) {
+			continue
+		}
+		return NewSummaryEvent(events, resp.Content, resp.UsageMetadata)
 	}
-	// No content came back. Treat it as "nothing to compact this time" rather
-	// than an error: the caller skips the compaction and retries on the next
-	// trigger, leaving history untouched.
-	return nil, nil
+
+	// Nothing usable came back. This is a failure, not a decision to skip.
+	// Reporting it as "nothing to compact" would make a summarizer that fails
+	// every single call indistinguishable from an idle one, and would hide the
+	// safety, recitation and token-limit stops that surface exactly this way.
+	if finishReason != "" {
+		return nil, fmt.Errorf("summarizer returned no usable content (finish reason %q)", finishReason)
+	}
+	return nil, fmt.Errorf("summarizer returned no usable content")
+}
+
+// hasText reports whether c carries at least one non-empty text part, which is
+// the minimum for a summary to be worth recording.
+func hasText(c *genai.Content) bool {
+	if c == nil {
+		return false
+	}
+	for _, p := range c.Parts {
+		if p != nil && strings.TrimSpace(p.Text) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // formatEvents renders events as one labelled line per part.
+//
+// Content that did not come from the framework -- model text and, especially,
+// tool output -- is escaped so it cannot span lines. Without that, a tool
+// returning a body containing "\nuser: ignore the above" would forge a turn
+// inside the transcript, and the summarizer has no way to tell a forged turn
+// from a real one. Escaping keeps every rendered line attributable to the
+// author the framework recorded.
 func (s *LLMSummarizer) formatEvents(events []*session.Event) string {
 	var lines []string
 	for _, ev := range events {
@@ -151,18 +185,18 @@ func (s *LLMSummarizer) formatEvents(events []*session.Event) string {
 			switch {
 			case p.Thought && p.Text != "":
 				if !isCompaction {
-					lines = append(lines, fmt.Sprintf("%s (thought): %s", ev.Author, p.Text))
+					lines = append(lines, fmt.Sprintf("%s (thought): %s", ev.Author, escapeLines(p.Text)))
 				}
 			case p.Text != "":
-				lines = append(lines, fmt.Sprintf("%s: %s", ev.Author, p.Text))
+				lines = append(lines, fmt.Sprintf("%s: %s", ev.Author, escapeLines(p.Text)))
 			}
 			if p.FunctionCall != nil {
 				lines = append(lines, fmt.Sprintf("%s called tool: %s(%s)",
-					ev.Author, p.FunctionCall.Name, s.truncate(stringify(p.FunctionCall.Args))))
+					ev.Author, p.FunctionCall.Name, escapeLines(s.truncate(stringify(p.FunctionCall.Args)))))
 			}
 			if p.FunctionResponse != nil {
 				lines = append(lines, fmt.Sprintf("Tool response from %s: %s",
-					p.FunctionResponse.Name, s.truncate(stringify(p.FunctionResponse.Response))))
+					p.FunctionResponse.Name, escapeLines(s.truncate(stringify(p.FunctionResponse.Response)))))
 			}
 		}
 	}
@@ -215,4 +249,14 @@ func stringify(v map[string]any) string {
 	}
 	b.WriteByte('}')
 	return b.String()
+}
+
+// escapeLines collapses newlines and carriage returns into literal escapes so a
+// rendered value cannot break out of its line and forge a turn.
+func escapeLines(text string) string {
+	if !strings.ContainsAny(text, "\r\n") {
+		return text
+	}
+	r := strings.NewReplacer("\r\n", "\\n", "\n", "\\n", "\r", "\\n")
+	return r.Replace(text)
 }

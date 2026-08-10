@@ -37,8 +37,12 @@ func NewSummaryEvent(events []*session.Event, summary *genai.Content, usage *gen
 	if len(events) == 0 {
 		return nil, fmt.Errorf("cannot summarize an empty event list")
 	}
-	if summary == nil {
-		return nil, fmt.Errorf("summary content is nil")
+	// An empty summary is rejected, not just a nil one. Recording a compaction
+	// whose content says nothing deletes the covered turns from every future
+	// prompt and puts nothing in their place, which is worse than not
+	// compacting at all.
+	if !hasText(summary) {
+		return nil, fmt.Errorf("summary content is empty, so compacting would delete the covered events and replace them with nothing")
 	}
 	start, end := events[0].Timestamp, events[len(events)-1].Timestamp
 	if end.Before(start) {

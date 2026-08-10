@@ -18,8 +18,20 @@
 // A compaction never modifies or deletes history. Summarizing a range of events
 // appends one new [session.Event] carrying a [session.EventCompaction] that
 // records the covered timestamp range and the summary content. When the next
-// prompt is built, [Apply] drops the raw events inside that range and
-// materializes the summary in their place.
+// prompt is built, the raw events inside that range are dropped and the summary
+// is materialized in their place.
+//
+// # What each strategy achieves
+//
+// Sliding window replaces each group of invocations with one summary, but
+// summaries are never themselves re-summarized. Prompt size therefore still
+// grows with conversation length, at a reduced constant factor rather than
+// being bounded.
+//
+// Tail retention is what bounds it: each new summary is seeded with the
+// previous one, so history stays as a single rolling summary plus a raw tail.
+// An agent that needs a genuine ceiling on prompt size should enable it, either
+// on its own or alongside the sliding window.
 //
 // Compaction is enabled per runner. See the EventsCompactionConfig field on
 // runner.Config:
