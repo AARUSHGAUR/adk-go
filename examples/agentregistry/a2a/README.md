@@ -4,7 +4,7 @@ Register an agent of your own, then resolve it back out of the catalog and talk 
 
 - **Concept:** the registry hands you a card and a URL; the A2A conversation is yours alone.
 - **Needs LLM?** No — the published agent is a canned echo, so all you need is ADC.
-- **Needs a registry?** Yes, plus a one-time registration — see [Setup](#setup).
+- **Needs a registry?** Yes, plus a one-time registration — see [Prerequisites](../README.md#prerequisites) and [Setup](#setup).
 
 ## Goal
 
@@ -56,6 +56,8 @@ sequenceDiagram
 
 ## Setup
 
+On top of the [shared prerequisites](../README.md#prerequisites) this sample **writes** to the registry, so `roles/agentregistry.viewer` is not enough: you need create and delete permission on Agent Registry `Services`.
+
 Register the agent once. The card's `url` must match where the sample serves, and its `protocolBinding` must match the handler the sample uses (`HTTP+JSON` ↔ `a2asrv.NewRESTHandler`).
 
 ```bash
@@ -82,7 +84,7 @@ gcloud agent-registry services create adk-a2a-demo \
   --location=global --project=$GOOGLE_CLOUD_PROJECT --billing-project=$GOOGLE_CLOUD_PROJECT \
   --display-name="ADK A2A sample" \
   --agent-spec-type=a2a-agent-card \
-  --agent-spec-content=@/tmp/card.json
+  --agent-spec-content=/tmp/card.json
 ```
 
 The `Service` you created projects a read-only `Agent`, and that projection is what the client reads. Ask for its name:
@@ -105,9 +107,9 @@ go run ./examples/agentregistry/a2a/
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `GOOGLE_CLOUD_PROJECT` | yes | Project whose registry is read |
-| `GOOGLE_CLOUD_LOCATION` | no | Registry location, defaults to `global` |
-| `REGISTRY_AGENT` | yes | Resource name of the projected agent |
+| `GOOGLE_CLOUD_PROJECT` | yes | Quota project billed for the registry calls — the project *read* comes from `REGISTRY_AGENT` |
+| `GOOGLE_CLOUD_LOCATION` | no | Client location, defaults to `global`; only the value inside `REGISTRY_AGENT` selects what is read |
+| `REGISTRY_AGENT` | yes | Resource name of the projected agent; being absolute, it carries its own project and location |
 | `A2A_ADDR` | no | Where to serve, defaults to `localhost:8765`; must match the card |
 
 ## Example session
@@ -121,7 +123,7 @@ Resolved "registry_echo" from the registry; the URL and transport came from its 
 <<< echo: Hello from the registry!
 ```
 
-`registry_echo` is the name from the **card**, not from the local `agent.New` — proof the identity came out of the catalog. The reply carries the request text back, so both directions of the exchange are covered.
+`registry_echo` is the name the client read from the **card** — though the local `agent.New` uses that name too, so it is the code, not the line, that shows where it came from: the consuming half never names the agent. The reply carries the request text back, so both directions of the exchange are covered.
 
 ## Cleaning up
 
@@ -134,8 +136,9 @@ Deleting the `Service` removes the projected agent from the catalog.
 
 ## Notes
 
-- **`--agent-spec-type=a2a-agent-card`, not `no-spec`.** `RemoteAgent` looks for a protocol of type `A2A_AGENT`; `no-spec` registers a `CUSTOM` one, and resolution fails with `A2A connection URI not found`.
+- **`--agent-spec-type=a2a-agent-card`, not `no-spec`.** `a2a-agent-card` embeds the card the client reads. `no-spec` leaves the record with neither a card nor an `A2A_AGENT` protocol, so resolution falls through to the protocol lookup and fails with `A2A connection URI not found`.
 - **`skills` must be non-empty**, each with `id`/`name`/`description`/`tags`, or the create call is rejected.
+- **Keep `protocolBinding` in step with the handler you serve** — `HTTP+JSON` for `a2asrv.NewRESTHandler`, `JSONRPC` for `a2asrv.NewJSONRPCHandler`. A mismatch only shows up as an empty reply at the first message. Write the A2A spelling in the card even though `agents describe` reads the binding back as `HTTP_JSON`: the client maps the registry's wire value for you, but a card that *contains* `HTTP_JSON` is unmarshalled verbatim and matches no transport, which fails with `no compatible transports found`.
 - **Egress auth is yours.** Nothing here needs it because localhost is not behind IAM. A published agent that is behind IAM needs `WithA2AHTTPClient` — and the right scopes for *that* agent, which are not always `cloud-platform`.
-- **A failed A2A call is quiet.** It arrives as an event with `LLMResponse.ErrorMessage` set and no content, which reads as an empty answer if you only look at content; `ask` checks for it explicitly.
-- **No embedded card? Still fine.** When a record has no `A2A_AGENT_CARD`, `RemoteAgent` synthesizes one from the record's protocols. Both paths end in the same `agent.Agent`.
+- **A failed A2A call is quiet.** It arrives as an event with `LLMResponse.ErrorMessage` set — and, from an ADK-served agent, no content at all — so it reads as an empty answer if you only look at content. `ask` checks for it explicitly, and likewise skips partial events, because a streaming agent sends its text once in chunks and again as one aggregated event.
+- **No embedded card? Still fine.** When a record has no `A2A_AGENT_CARD`, `RemoteAgent` synthesizes one from the record's protocols. Both paths produce an `agent.Agent`, but not an identical one: the synthesized card takes its name from the record's display name and defaults its input and output modes to text.

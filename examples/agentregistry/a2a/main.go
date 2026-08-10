@@ -25,9 +25,12 @@ package main
 import (
 	"cmp"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -45,16 +48,23 @@ import (
 )
 
 func main() {
-	ctx := context.Background()
+	// Output here is a transcript, not a log: the timestamp prefix is noise.
+	log.SetFlags(0)
+	// run owns the listener; log.Fatal inside it would skip the deferred close.
+	if err := run(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+}
 
+func run(ctx context.Context) error {
 	project := os.Getenv("GOOGLE_CLOUD_PROJECT")
 	if project == "" {
-		log.Fatal("GOOGLE_CLOUD_PROJECT must be set")
+		return errors.New("GOOGLE_CLOUD_PROJECT must be set")
 	}
 	location := cmp.Or(os.Getenv("GOOGLE_CLOUD_LOCATION"), "global")
 	name := os.Getenv("REGISTRY_AGENT")
 	if name == "" {
-		log.Fatal("REGISTRY_AGENT must be set to the agent resource name from registration; see the README")
+		return errors.New("REGISTRY_AGENT must be set to the agent resource name from registration; see the README")
 	}
 	// Must match the URL in the card that was registered.
 	addr := cmp.Or(os.Getenv("A2A_ADDR"), "localhost:8765")
@@ -62,7 +72,7 @@ func main() {
 	// Publishing: in production this is the agent owner's deployment.
 	srv, err := serve(addr)
 	if err != nil {
-		log.Fatalf("Failed to start the A2A server: %v", err)
+		return fmt.Errorf("failed to start the A2A server: %w", err)
 	}
 	defer func() { _ = srv.Close() }()
 	log.Printf("Serving an agent over A2A at http://%s", addr)
@@ -73,22 +83,23 @@ func main() {
 		Location:  location,
 	})
 	if err != nil {
-		log.Fatalf("Failed to create the registry client: %v", err)
+		return fmt.Errorf("failed to create the registry client: %w", err)
 	}
 
 	// No egress options: the registered card points at localhost, which is not
 	// behind IAM. An agent that is needs WithA2AHTTPClient.
 	remote, err := client.RemoteAgent(ctx, name)
 	if err != nil {
-		log.Fatalf("Failed to resolve %q: %v", name, err)
+		return fmt.Errorf("failed to resolve %q: %s", name, explain(err))
 	}
 	log.Printf("Resolved %q from the registry; the URL and transport came from its card", remote.Name())
 
 	reply, err := ask(ctx, remote, "Hello from the registry!")
 	if err != nil {
-		log.Fatalf("Failed to reach the agent over A2A: %v", err)
+		return fmt.Errorf("failed to reach the agent over A2A: %w", err)
 	}
 	fmt.Printf("\n<<< %s\n", reply)
+	return nil
 }
 
 // ask runs one turn against the agent and returns its text.
@@ -109,10 +120,16 @@ func ask(ctx context.Context, a agent.Agent, prompt string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		// A failed A2A call arrives as an event carrying an error and no
-		// content, which would otherwise read as a silent empty answer.
+		// A failed A2A call arrives as an event carrying an error, which would
+		// otherwise read as the agent simply having nothing to say.
 		if event.LLMResponse.ErrorMessage != "" {
 			return "", fmt.Errorf("remote agent: %s", event.LLMResponse.ErrorMessage)
+		}
+		// A streaming agent sends each chunk as a partial event and then the
+		// whole text again in one non-partial event; progress notes arrive as
+		// partials too. Summing both would return the answer twice.
+		if event.LLMResponse.Partial {
+			continue
 		}
 		if event.LLMResponse.Content != nil {
 			for _, part := range event.LLMResponse.Content.Parts {
@@ -121,7 +138,7 @@ func ask(ctx context.Context, a agent.Agent, prompt string) (string, error) {
 		}
 	}
 	if reply.Len() == 0 {
-		return "", fmt.Errorf("empty reply")
+		return "", errors.New("empty reply")
 	}
 	return reply.String(), nil
 }
@@ -156,19 +173,53 @@ func serve(addr string) (*http.Server, error) {
 			SessionService: session.InMemoryService(),
 		},
 	}))
-	// The card registered for this agent declares HTTP+JSON, so serve REST.
-	srv := &http.Server{Addr: addr, Handler: a2asrv.NewRESTHandler(handler)}
+	srv := &http.Server{
+		// The card registered for this agent declares HTTP+JSON, so serve REST.
+		Handler: a2asrv.NewRESTHandler(handler),
+		// Only localhost here, but readers copy sample servers into deployments.
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
-	failed := make(chan error, 1)
+	// Bind before returning: net.Listen either takes the port or says why not,
+	// so the caller never races a server that has not come up yet.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			failed <- err
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("A2A server stopped: %v", err)
 		}
 	}()
-	select {
-	case err := <-failed:
-		return nil, err
-	case <-time.After(300 * time.Millisecond):
-		return srv, nil
+	return srv, nil
+}
+
+// explain renders a registry failure as something a human can act on. The
+// service reports a denial as a screenful of JSON, so unwrap the typed
+// [agentregistry.APIError] and keep the parts that identify the fix.
+//
+// It returns text, not an error: wrapping the result back into one with %w
+// would re-append the envelope it exists to suppress.
+func explain(err error) string {
+	var apiErr *agentregistry.APIError
+	if !errors.As(err, &apiErr) {
+		return err.Error()
 	}
+	var envelope struct {
+		Error struct {
+			Message string `json:"message"`
+			Status  string `json:"status"`
+		} `json:"error"`
+	}
+	detail := apiErr.Body
+	if json.Unmarshal([]byte(apiErr.Body), &envelope) == nil && envelope.Error.Message != "" {
+		detail = envelope.Error.Message
+		if envelope.Error.Status != "" {
+			detail = envelope.Error.Status + ": " + detail
+		}
+	}
+	if apiErr.StatusCode == http.StatusForbidden {
+		detail += "\nGrant roles/agentregistry.viewer on this project, or point GOOGLE_CLOUD_PROJECT at one where you have it."
+	}
+	return fmt.Sprintf("HTTP %d — %s", apiErr.StatusCode, detail)
 }

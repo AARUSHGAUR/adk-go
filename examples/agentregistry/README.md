@@ -1,15 +1,15 @@
 # Agent Registry examples
 
-Runnable samples for the **Google Cloud Agent Registry** client (`google.golang.org/adk/v2/agentregistry`) — a governed catalog of A2A agents, MCP servers, and model endpoints. One sample browses the catalog; the other builds an agent out of what it finds.
+Runnable samples for the **Google Cloud Agent Registry** client (`google.golang.org/adk/v2/agentregistry`) — a governed catalog of A2A agents, MCP servers, and model endpoints. One browses the catalog, one builds an agent out of what it finds, one publishes an agent and reaches it back through the catalog.
 
 Every example has its own README with a Mermaid diagram, a goal, run instructions, and an example session.
 
 ## Prerequisites
 
-Both samples talk to the real `agentregistry.googleapis.com`. You need:
+All three samples talk to the real `agentregistry.googleapis.com`. You need:
 
 - a project with the Agent Registry API enabled,
-- `roles/agentregistry.viewer` on it (reading is enough here — without it every call fails with `403 PERMISSION_DENIED`),
+- `roles/agentregistry.viewer` on it — enough for `discover` and `bind`; `a2a` also registers a `Service`, so it needs create and delete permission on top. Without the read role every call fails with `403 PERMISSION_DENIED`,
 - Application Default Credentials.
 
 ```bash
@@ -20,7 +20,7 @@ export GOOGLE_CLOUD_PROJECT=your-project
 
 You probably don't have to register anything to try the samples: enabling a supported Google Cloud API auto-registers its **remote MCP server** in your registry. A fresh project typically already lists `run.googleapis.com`, `logging.googleapis.com`, `compute.googleapis.com`, and friends — all of which `bind` can consume as-is.
 
-The client authenticates with ADC and bills the quota project (`GOOGLE_CLOUD_QUOTA_PROJECT`, the credentials' `quota_project_id`, then `GOOGLE_CLOUD_PROJECT`, in that order). `gcloud` picks its quota project separately, so pass `--billing-project` to it or an unrelated default can deny the call with `USER_PROJECT_DENIED`.
+The client authenticates with ADC and bills the quota project (`GOOGLE_CLOUD_QUOTA_PROJECT`, then the credentials' `quota_project_id` on the ADC path, then `Config.ProjectID` — which these samples take from `GOOGLE_CLOUD_PROJECT`). `gcloud` picks its quota project separately, so pass `--billing-project` to it or an unrelated default can deny the call with `USER_PROJECT_DENIED`.
 
 To see what is registered without running any Go code:
 
@@ -33,7 +33,7 @@ Reference: [Agent Registry overview](https://docs.cloud.google.com/agent-registr
 
 ### If you get `403 PERMISSION_DENIED`
 
-Check which project you are actually hitting — `echo $GOOGLE_CLOUD_PROJECT`. A shell profile or a previous `gcloud config set` often leaves a default pointing at a project without the API enabled or without the viewer role, and the samples print the project they used on their first line:
+Check which project you are actually hitting — `echo $GOOGLE_CLOUD_PROJECT`. A shell profile or a previous `gcloud config set` often leaves a default pointing at a project without the API enabled or without the viewer role, and the resource in the error names the project the call actually went to:
 
 ```text
 Failed to list agents: HTTP 403 — PERMISSION_DENIED: Permission 'agentregistry.agents.list'
@@ -79,7 +79,7 @@ The dotted line is the point of the whole thing: **the registry is a catalog, ne
 
 The registry's write surface is the `Service` resource. You create a `Service`; the registry *projects* read-only `Agent` and `McpServer` resources from it — those are what the client reads, and they carry generated IDs like `agentregistry-00000000-0000-0000-630f-070a9d06e171`, not the ID you chose, so read the projected name back with `services describe --format='value(registryResource)'`.
 
-The [`a2a`](./a2a) sample walks the whole loop with a working card, and its notes cover the traps that cost the most time: `a2a-agent-card` versus `no-spec`, the non-empty `skills` requirement, and keeping the card's `protocolBinding` in step with the handler you serve.
+The [`a2a`](./a2a) sample walks the whole loop with a working card, and its notes cover the traps that cost the most time: `a2a-agent-card` versus `no-spec`, the non-empty `skills` requirement, and keeping the card's `protocolBinding` in step with the handler you serve. Registering is also the one thing here that needs more than the viewer role.
 
 ## Core concepts at a glance
 
