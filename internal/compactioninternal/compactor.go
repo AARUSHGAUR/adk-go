@@ -99,19 +99,7 @@ func summarizeTraced(ctx context.Context, cfg *compaction.Config, sess session.S
 	// The newest event rather than the newest one in the window: the window is
 	// what is being summarized, which for tail retention deliberately excludes
 	// the turn in progress, and it is that turn we want to name.
-	invocationID := latestInvocationID(sess)
-	ctx, span := telemetry.StartCompactEventsSpan(ctx, telemetry.StartCompactEventsSpanParams{
-		Trigger:            trigger,
-		SessionID:          sessionID,
-		InvocationID:       invocationID,
-		SummarizerType:     summarizerTypeName(cfg.Summarizer),
-		Backend:            summarizerBackend(cfg.Summarizer),
-		EventCount:         len(window),
-		CompactionInterval: cfg.CompactionInterval,
-		OverlapSize:        cfg.OverlapSize,
-		TokenThreshold:     cfg.TokenThreshold,
-		EventRetentionSize: cfg.EventRetentionSize,
-	})
+	ctx, span := telemetry.StartCompactEventsSpan(ctx, spanParams(cfg, sessionID, latestInvocationID(sess), trigger, len(window)))
 	// A Summarizer is third-party code and may panic. The OTel SDK records an
 	// exception event on the way out but leaves the status Unset, which reads
 	// as success, so a panicking summarizer would look like a healthy one that
@@ -232,4 +220,35 @@ func latestInvocationID(sess session.Session) string {
 		}
 	}
 	return ""
+}
+
+// spanParams builds the attribute set shared by every compaction span.
+func spanParams(cfg *compaction.Config, sessionID, invocationID, trigger string, eventCount int) telemetry.StartCompactEventsSpanParams {
+	return telemetry.StartCompactEventsSpanParams{
+		Trigger:            trigger,
+		SessionID:          sessionID,
+		InvocationID:       invocationID,
+		SummarizerType:     summarizerTypeName(cfg.Summarizer),
+		Backend:            summarizerBackend(cfg.Summarizer),
+		EventCount:         eventCount,
+		CompactionInterval: cfg.CompactionInterval,
+		OverlapSize:        cfg.OverlapSize,
+		TokenThreshold:     cfg.TokenThreshold,
+		EventRetentionSize: cfg.EventRetentionSize,
+	}
+}
+
+// traceDeclined records a compaction that was triggered but could not run.
+//
+// A trigger that never fires stays silent, so a span in a trace still means
+// compaction was actually wanted. This is the other case: the threshold was
+// crossed and there was nothing the compactor could legally summarize, which
+// otherwise looked identical to a healthy idle session while the prompt kept
+// growing on every turn.
+func traceDeclined(ctx context.Context, cfg *compaction.Config, sess session.Session, trigger, reason string) {
+	id := ""
+	if sess != nil {
+		id = sess.ID()
+	}
+	telemetry.TraceCompactionDeclined(ctx, spanParams(cfg, id, latestInvocationID(sess), trigger, 0), reason)
 }
