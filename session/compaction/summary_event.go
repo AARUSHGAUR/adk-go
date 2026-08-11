@@ -35,12 +35,18 @@ import (
 // sliding-window selection counts invocations. That is why this takes no
 // context.Context where [session.NewEvent] does.
 //
-// events must be non-empty and in chronological order, and summary must be
-// non-nil and hold text. usage may be nil. An error is returned rather than a
-// silently broken event, because a range that covers nothing leaves the
-// compacted turns in every future prompt while still consuming a summary.
-// [session.EventCompaction] is a plain struct with no constructor to validate
-// in, so the checks live here, at the supported way to build one.
+// Only prose parts of summary survive into the stored event. A summary is
+// prose by definition, and anything else reaches a later prompt as if the
+// framework had produced it, so a function call a summarizer invented or was
+// tricked into emitting cannot ride along.
+//
+// events must be non-empty, hold no nil element and be in chronological
+// order, and summary must be non-nil and hold prose. usage may be nil. An
+// error is returned rather than a silently broken event, because a range that
+// covers nothing leaves the compacted turns in every future prompt while
+// still consuming a summary. [session.EventCompaction] is a plain struct with
+// no constructor to validate in, so the checks live here, at the supported
+// way to build one.
 func NewSummaryEvent(events []*session.Event, summary *genai.Content, usage *genai.GenerateContentResponseUsageMetadata) (*session.Event, error) {
 	if len(events) == 0 {
 		return nil, fmt.Errorf("cannot summarize an empty event list")
