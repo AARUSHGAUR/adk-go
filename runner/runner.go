@@ -231,7 +231,7 @@ type Runner struct {
 //
 // The summary itself is deliberately not yielded to the caller. It is
 // bookkeeping for the next prompt, not part of the conversation.
-func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession session.Session) error {
+func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession session.Session, ictx agent.InvocationContext) error {
 	if !compactioninternal.HasSlidingWindow(r.compactionConfig) {
 		return nil
 	}
@@ -277,6 +277,25 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	if compactioninternal.RangeRaced(latest, current, summary) {
 		log.Printf("adk: discarding a context compaction summary because the session changed inside its range while summarizing")
 		return nil
+	}
+
+	// Plugins see the summary before it is stored, like every other event the
+	// runner persists.
+	//
+	// The reference implementation reaches the same place from the other
+	// direction: its sliding window yields the event and lets the runner append
+	// it, so that persistence stays at the runtime's synchronisation point.
+	// Appending straight from the compactor skipped the one hook that lets a
+	// plugin see, rewrite or reject what goes into a session, and a summary is
+	// exactly the kind of derived content a redaction plugin would care about.
+	if ictx != nil && r.pluginManager != nil {
+		modified, err := r.pluginManager.RunOnEventCallback(ictx, summary)
+		if err != nil {
+			return fmt.Errorf("%w: plugin rejected the summary event: %w", compaction.ErrCompaction, err)
+		}
+		if modified != nil {
+			summary = modified
+		}
 	}
 
 	if err := r.sessionService.AppendEvent(ctx, current, summary); err != nil {
@@ -440,13 +459,17 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		//
 		// On an early exit the error cannot be yielded, because yield must not
 		// be called once it has returned false, so it is logged instead.
+		// Assigned once the invocation context exists, below. The compaction
+		// hook runs from a defer, so it reads whatever this holds by then.
+		var invocationCtx agent.InvocationContext
+
 		compacted := false
 		compactOnce := func() error {
 			if compacted || invocationFailed {
 				return nil
 			}
 			compacted = true
-			return r.compactAfterInvocation(ctx, storedSession)
+			return r.compactAfterInvocation(ctx, storedSession, invocationCtx)
 		}
 		defer func() {
 			if err := compactOnce(); err != nil {
@@ -483,6 +506,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			RunConfig:    &cfg,
 			InvocationID: resolveInvocationID(storedSession, msg),
 		})
+		invocationCtx = ic
 		ctx := agent.NewContext(ic)
 		ctx, _, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
 		if err != nil {

@@ -99,13 +99,17 @@ func (r *Runner) runNode(
 	//
 	// On an early exit the error cannot be yielded, because yield must not be
 	// called once it has returned false, so it is logged instead.
+	// Assigned once the invocation context exists, below. The compaction hook
+	// runs from a defer, so it reads whatever this holds by then.
+	var invocationCtx agent.InvocationContext
+
 	compacted := false
 	compactOnce := func() error {
 		if compacted || invocationFailed {
 			return nil
 		}
 		compacted = true
-		return r.compactAfterInvocation(ctx, storedSession)
+		return r.compactAfterInvocation(ctx, storedSession, invocationCtx)
 	}
 	defer func() {
 		if err := compactOnce(); err != nil {
@@ -129,6 +133,7 @@ func (r *Runner) runNode(
 
 	// UserContent is read by Workflow.Run as the workflow's seed input.
 	ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, cfg)
+	invocationCtx = ictx
 
 	// Append the user message to history (also runs the on_user_message
 	// plugin callback), same as the agent path.

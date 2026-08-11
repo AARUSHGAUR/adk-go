@@ -21,6 +21,7 @@ import (
 	"iter"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/go-cmp/cmp"
@@ -626,5 +627,45 @@ func TestFormatEventsEscapesAuthorAndToolNames(t *testing.T) {
 	}
 	if n := len(strings.Split(got, "\n")); n != 2 {
 		t.Errorf("transcript has %d lines, want 2: a label spanned lines\n%s", n, got)
+	}
+}
+
+// hangingModel never returns until its context is done.
+type hangingModel struct{}
+
+func (m *hangingModel) Name() string { return "hanging" }
+
+func (m *hangingModel) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		<-ctx.Done()
+		yield(nil, ctx.Err())
+	}
+}
+
+// TestSummarizeEventsHonoursTimeout checks that a hung summarizer gives up.
+//
+// The call is synchronous inside the run loop, so without a bound one that
+// never returns holds up the turn behind it. Compaction is an optimisation, so
+// giving up on it is cheap. Zero means no timeout, which is what every other
+// implementation does today.
+func TestSummarizeEventsHonoursTimeout(t *testing.T) {
+	t.Parallel()
+
+	s, err := NewLLMSummarizer(LLMSummarizerConfig{Model: &hangingModel{}, Timeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("NewLLMSummarizer() error = %v", err)
+	}
+
+	events := []*session.Event{textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1")}
+	done := make(chan error, 1)
+	go func() { _, err := s.SummarizeEvents(context.Background(), events); done <- err }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("SummarizeEvents() returned no error after its timeout")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SummarizeEvents() did not return; the timeout is not applied")
 	}
 }

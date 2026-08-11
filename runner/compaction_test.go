@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
 	"google.golang.org/adk/v2/tool"
@@ -806,4 +807,89 @@ func TestCompactionOverlapWidensTheStoredRange(t *testing.T) {
 	if secondRangeStartsBeforeFirstEnds(t, 0) {
 		t.Error("with OverlapSize 0 the second summary still reaches back into the first range")
 	}
+}
+
+// TestSummaryPassesThroughPlugins checks that a compaction summary is offered to
+// plugins before it is stored.
+//
+// Every other event the runner persists goes through the event callback, which
+// is where a plugin sees, rewrites or rejects what enters a session. The summary
+// was appended straight from the compactor and skipped it, even though derived
+// content is exactly what a redaction plugin would care about. The reference
+// implementation reaches the same place by yielding the event and letting the
+// runner append it.
+func TestSummaryPassesThroughPlugins(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+
+	var mu sync.Mutex
+	var sawSummary bool
+	redactor, err := plugin.New(plugin.Config{
+		Name: "redactor",
+		OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+			if !compaction.IsCompactionEvent(ev) {
+				return nil, nil
+			}
+			mu.Lock()
+			sawSummary = true
+			mu.Unlock()
+			// Rewriting proves the returned event is the one that gets stored.
+			out := *ev
+			rec := *ev.Actions.Compaction
+			rec.CompactedContent = genai.NewContentFromText("REDACTED", "model")
+			out.Actions.Compaction = &rec
+			return &out, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+
+	root, err := llmagent.New(llmagent.Config{Name: "assistant", Model: &scriptedModel{replyFmt: "answer %d"}})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	svc := session.InMemoryService()
+	r, err := New(Config{
+		AppName:                "compaction_app",
+		Agent:                  root,
+		SessionService:         svc,
+		AutoCreateSession:      true,
+		PluginConfig:           PluginConfig{Plugins: []*plugin.Plugin{redactor}},
+		EventsCompactionConfig: &compaction.Config{CompactionInterval: 1, Summarizer: &recordingSummarizer{summary: "ORIGINAL"}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}))
+
+	mu.Lock()
+	seen := sawSummary
+	mu.Unlock()
+	if !seen {
+		t.Fatal("no plugin ever saw the summary, so it bypassed the event pipeline")
+	}
+	stored := compactionEventsIn(getSession(t, svc, userID, sessionID))
+	if len(stored) != 1 {
+		t.Fatalf("stored %d compaction events, want 1", len(stored))
+	}
+	if got := textOfContent(stored[0].Actions.Compaction.CompactedContent); got != "REDACTED" {
+		t.Errorf("stored summary = %q, want the plugin's rewrite: the returned event is not the one persisted", got)
+	}
+}
+
+// textOfContent joins the text parts of content.
+func textOfContent(c *genai.Content) string {
+	if c == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range c.Parts {
+		if p != nil {
+			b.WriteString(p.Text)
+		}
+	}
+	return b.String()
 }

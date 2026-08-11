@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"google.golang.org/genai"
@@ -90,6 +91,14 @@ type LLMSummarizerConfig struct {
 	// the remedy is a smaller window.
 	MaxTranscriptChars int
 
+	// Timeout bounds the summarization call. Zero, the default, means no
+	// timeout, which is the behaviour every ADK implementation has today.
+	//
+	// Worth setting. The call is synchronous inside the run loop, so a
+	// summarizer that hangs holds up the turn behind it with nothing to show
+	// for it, and compaction is an optimisation: giving up on it is cheap.
+	Timeout time.Duration
+
 	// GenerateContentConfig is applied to the summarization call.
 	//
 	// The runner passes the root agent's config here, so safety settings and
@@ -118,6 +127,7 @@ type LLMSummarizer struct {
 	maxToolContentChars int
 	maxTranscriptChars  int
 	genConfig           *genai.GenerateContentConfig
+	timeout             time.Duration
 }
 
 var _ Summarizer = (*LLMSummarizer)(nil)
@@ -147,6 +157,7 @@ func NewLLMSummarizer(cfg LLMSummarizerConfig) (*LLMSummarizer, error) {
 		promptTemplate:      template,
 		maxToolContentChars: maxChars,
 		maxTranscriptChars:  maxTranscript,
+		timeout:             cfg.Timeout,
 		genConfig:           summarizerGenConfig(cfg.GenerateContentConfig),
 	}, nil
 }
@@ -166,6 +177,14 @@ func (s *LLMSummarizer) SummarizeEvents(ctx context.Context, events []*session.E
 		Model:    s.model.Name(),
 		Contents: []*genai.Content{genai.NewContentFromText(prompt, genai.RoleUser)},
 		Config:   s.genConfig,
+	}
+
+	// A timeout here bounds the model call only. The caller's own deadline
+	// still applies, so this can shorten the wait but never extend it.
+	if s.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.timeout)
+		defer cancel()
 	}
 
 	var finishReason genai.FinishReason
