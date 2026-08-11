@@ -475,7 +475,7 @@ func TestTailRetentionEmitsSpan(t *testing.T) {
 	}
 	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 0, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	if _, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil); err != nil {
+	if _, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil, nil); err != nil {
 		t.Fatalf("TailRetention() error = %v", err)
 	}
 
@@ -514,7 +514,7 @@ func TestCompactionSpanRecordsTailRetentionThresholds(t *testing.T) {
 		Summarizer:         &fakeSummarizer{summary: "SUM"},
 	}
 
-	if _, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, func([]*session.Event) int { return 1000 }); err != nil {
+	if _, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, func([]*session.Event) int { return 1000 }, nil); err != nil {
 		t.Fatalf("TailRetention() error = %v", err)
 	}
 
@@ -555,7 +555,7 @@ func TestCompactionSpanRecordsADecline(t *testing.T) {
 		Summarizer:         &fakeSummarizer{summary: "SUM"},
 	}
 
-	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, func([]*session.Event) int { return 1000 })
+	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, func([]*session.Event) int { return 1000 }, nil)
 	if err != nil || got != nil {
 		t.Fatalf("TailRetention() = (%v, %v), want (nil, nil)", got, err)
 	}

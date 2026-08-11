@@ -41,7 +41,7 @@ func TestFromContextWithoutRuntime(t *testing.T) {
 func TestRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	want := &Runtime{Config: &compaction.Config{CompactionInterval: 2}, SessionService: session.InMemoryService()}
+	want := New(&compaction.Config{CompactionInterval: 2}, session.InMemoryService())
 	got := FromContext(ToContext(context.Background(), want))
 	if got != want {
 		t.Fatalf("FromContext() returned %v, want the runtime that was stored", got)
@@ -56,7 +56,7 @@ func TestRoundTrip(t *testing.T) {
 func TestMarkCompactedIsSafeUnderConcurrency(t *testing.T) {
 	t.Parallel()
 
-	rt := &Runtime{Config: &compaction.Config{CompactionInterval: 1}}
+	rt := New(&compaction.Config{CompactionInterval: 1}, nil)
 	var wg sync.WaitGroup
 	for range 16 {
 		wg.Add(1)

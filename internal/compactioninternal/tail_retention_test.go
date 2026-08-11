@@ -383,7 +383,7 @@ func TestTailRetention(t *testing.T) {
 				cfg = &copied
 			}
 
-			got, err := TailRetention(context.Background(), cfg, &staticSession{events: tc.events}, nil)
+			got, err := TailRetention(context.Background(), cfg, &staticSession{events: tc.events}, nil, nil)
 			if gotErr := err != nil; gotErr != tc.wantErr {
 				t.Fatalf("TailRetention() error = %v, wantErr %t", err, tc.wantErr)
 			}
@@ -413,7 +413,7 @@ func TestTailRetentionUsesTheEstimator(t *testing.T) {
 	cfg := &compaction.Config{TokenThreshold: 500, EventRetentionSize: 2, Summarizer: summarizer}
 
 	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events},
-		func([]*session.Event) int { return 100 })
+		func([]*session.Event) int { return 100 }, nil)
 	if err != nil {
 		t.Fatalf("TailRetention() error = %v", err)
 	}
@@ -422,7 +422,7 @@ func TestTailRetentionUsesTheEstimator(t *testing.T) {
 	}
 
 	got, err = TailRetention(context.Background(), cfg, &staticSession{events: events},
-		func([]*session.Event) int { return 700 })
+		func([]*session.Event) int { return 700 }, nil)
 	if err != nil {
 		t.Fatalf("TailRetention() error = %v", err)
 	}
@@ -435,7 +435,7 @@ func TestTailRetentionRequiresSummarizer(t *testing.T) {
 	t.Parallel()
 
 	_, err := TailRetention(context.Background(), &compaction.Config{TokenThreshold: 1, EventRetentionSize: 0},
-		&staticSession{events: []*session.Event{withUsage(modelTextEvent("a", "inv1", 1, "a"), 10)}}, nil)
+		&staticSession{events: []*session.Event{withUsage(modelTextEvent("a", "inv1", 1, "a"), 10)}}, nil, nil)
 	if err == nil {
 		t.Fatal("TailRetention() with no Summarizer returned nil error, want an error")
 	}
@@ -450,7 +450,7 @@ func TestTailRetentionStampsTheSummary(t *testing.T) {
 	}
 	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 0, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil)
+	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil, nil)
 	if err != nil {
 		t.Fatalf("TailRetention() error = %v", err)
 	}
@@ -485,7 +485,7 @@ func TestTailRetentionThenApplyShrinksHistory(t *testing.T) {
 	}
 	cfg := &compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2, Summarizer: &fakeSummarizer{summary: "SUMMARY"}}
 
-	summary, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil)
+	summary, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil, nil)
 	if err != nil {
 		t.Fatalf("TailRetention() error = %v", err)
 	}
@@ -561,5 +561,41 @@ func TestSelectTailRetentionWindowKeepsATiedBoundaryEvent(t *testing.T) {
 	window := selectTailRetentionWindow(events, 1)
 	if !slices.Contains(ids(window), "tied") {
 		t.Errorf("window %v does not include the boundary event, so it is covered by the next range without being summarized", ids(window))
+	}
+}
+
+// TestPromptTokenCountAddsEventsSinceTheLastReport checks that the count is not
+// stale by a whole turn.
+//
+// A reported count describes the prompt of an earlier call. Returning it
+// unchanged means everything appended since is invisible, so the call that
+// first crosses the threshold is missed and compaction reacts one call late.
+func TestPromptTokenCountAddsEventsSinceTheLastReport(t *testing.T) {
+	t.Parallel()
+
+	reported := modelTextEvent("a", "inv1", 1, "answer")
+	reported.LLMResponse.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 100}
+	events := []*session.Event{
+		reported,
+		textEvent("b", "inv2", 2, strings.Repeat("x", 400)),
+	}
+
+	// The estimator stands in for the real one: four characters per token.
+	estimate := func(evs []*session.Event) int {
+		n := 0
+		for _, ev := range evs {
+			for _, p := range utils.Content(ev).Parts {
+				n += len(p.Text)
+			}
+		}
+		return n / 4
+	}
+
+	got, ok := promptTokenCount(events, estimate)
+	if !ok {
+		t.Fatal("promptTokenCount() reported nothing")
+	}
+	if got <= 100 {
+		t.Errorf("promptTokenCount() = %d, want more than the reported 100: the 400 characters appended since are not counted", got)
 	}
 }

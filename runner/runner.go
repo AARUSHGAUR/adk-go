@@ -317,13 +317,7 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 // to run intra-invocation compaction. It is nil when compaction is disabled for
 // this runner.
 func (r *Runner) compactionRuntime() *compactionctx.Runtime {
-	if r.compactionConfig == nil {
-		return nil
-	}
-	return &compactionctx.Runtime{
-		Config:         r.compactionConfig,
-		SessionService: r.sessionService,
-	}
+	return compactionctx.New(r.compactionConfig, r.sessionService)
 }
 
 // reloadSession re-fetches a session so compaction works against current state

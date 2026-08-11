@@ -34,15 +34,49 @@ import (
 // Runtime is everything compaction needs that the invocation context does not
 // already provide.
 type Runtime struct {
-	// Config is the resolved compaction config, with its summarizer filled in.
-	Config *compaction.Config
-	// SessionService persists the summary events the compactor produces.
-	SessionService session.Service
+	// config is the resolved compaction config, with its summarizer filled in.
+	//
+	// Unexported, with accessors, because one Runtime is shared by every
+	// goroutine in an invocation. An exported pointer field invites a caller to
+	// swap it mid-turn, and the config it points at is shared across every
+	// invocation of the runner, so a mutation would leak between turns.
+	config *compaction.Config
+	// sessionService persists the summary events the compactor produces.
+	sessionService session.Service
+
+	// lastCompactionTokens is the prompt size that triggered the most recent
+	// compaction in this invocation, or 0 if there has not been one.
+	lastCompactionTokens atomic.Int64
 
 	// compacted records that a compaction already ran in this invocation. A
 	// Runtime is built per invocation, so it is the right scope for this, and
 	// it is atomic because sub-agents running in parallel share one.
 	compacted atomic.Bool
+}
+
+// New builds a Runtime. A nil config yields a nil Runtime, which every method
+// here tolerates, so callers do not have to branch.
+func New(cfg *compaction.Config, svc session.Service) *Runtime {
+	if cfg == nil {
+		return nil
+	}
+	return &Runtime{config: cfg, sessionService: svc}
+}
+
+// Config returns the compaction config.
+func (rt *Runtime) Config() *compaction.Config {
+	if rt == nil {
+		return nil
+	}
+	return rt.config
+}
+
+// SessionService returns the service that persists summaries.
+func (rt *Runtime) SessionService() session.Service {
+	if rt == nil {
+		return nil
+	}
+	return rt.sessionService
 }
 
 // MarkCompacted records that a compaction ran during this invocation.
@@ -74,12 +108,12 @@ func (rt *Runtime) AlreadyCompacted() bool {
 // runner did not ask for would turn a stored field into an erase-and-inject
 // primitive, available even to an application that never enabled compaction.
 func (rt *Runtime) Configured() bool {
-	return rt != nil && rt.Config != nil
+	return rt != nil && rt.config != nil
 }
 
 // Enabled reports whether rt can actually run a tail-retention compaction.
 func (rt *Runtime) Enabled() bool {
-	return rt != nil && rt.SessionService != nil && compactioninternal.HasTailRetention(rt.Config)
+	return rt != nil && rt.sessionService != nil && compactioninternal.HasTailRetention(rt.config)
 }
 
 // ToContext returns a context carrying rt.
@@ -100,3 +134,30 @@ func FromContext(ctx context.Context) *Runtime {
 type ctxKey int
 
 const runtimeCtxKey ctxKey = 0
+
+// AllowAt reports whether a compaction at this prompt size is worth attempting.
+//
+// It declines when the previous compaction in this invocation did not bring the
+// prompt below the size that triggered it. That is the case where compacting
+// cannot help: the retained tail alone already exceeds the threshold, so every
+// model call crosses it again and each one pays for a summarizer call that
+// changes nothing. Measured before this existed: six summarizer calls inside a
+// single seven-call invocation.
+//
+// A prompt that has actually shrunk, or grown past where it was, is allowed
+// through, so a long turn can still compact more than once when doing so helps.
+func (rt *Runtime) AllowAt(tokens int) bool {
+	if rt == nil {
+		return false
+	}
+	last := rt.lastCompactionTokens.Load()
+	return last == 0 || int64(tokens) < last
+}
+
+// RecordAt notes the prompt size that triggered a compaction.
+func (rt *Runtime) RecordAt(tokens int) {
+	if rt == nil {
+		return
+	}
+	rt.lastCompactionTokens.Store(int64(tokens))
+}

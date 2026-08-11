@@ -1240,3 +1240,87 @@ func TestTailRetentionStandsDownTheSlidingWindow(t *testing.T) {
 		t.Errorf("stored %d compaction events, want 1", got)
 	}
 }
+
+// toolLoopModel calls a tool repeatedly, then answers, always reporting the
+// same prompt size. It stands in for a long tool loop whose retained tail alone
+// already exceeds the threshold, so compacting cannot bring the prompt down.
+type toolLoopModel struct {
+	mu     sync.Mutex
+	calls  int
+	rounds int
+	tokens int32
+}
+
+func (m *toolLoopModel) Name() string { return "tool-loop" }
+
+func (m *toolLoopModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	m.mu.Lock()
+	m.calls++
+	n := m.calls
+	m.mu.Unlock()
+
+	return func(yield func(*model.LLMResponse, error) bool) {
+		usage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: m.tokens}
+		if n <= m.rounds {
+			yield(&model.LLMResponse{
+				Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("c%d", n), Name: "ping"}},
+				}},
+				UsageMetadata: usage,
+			}, nil)
+			return
+		}
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("done", "model"), UsageMetadata: usage}, nil)
+	}
+}
+
+// TestTailRetentionStopsWhenItIsNotHelping checks that compaction gives up
+// inside a turn once it stops reducing the prompt.
+//
+// The threshold is crossed before every model call in a tool loop. If the
+// retained tail alone already exceeds it, compacting summarizes a little more
+// each round and leaves the prompt exactly as far over, so every round pays for
+// a summarizer call that changes nothing.
+func TestTailRetentionStopsWhenItIsNotHelping(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+
+	ping, err := functiontool.New(functiontool.Config{Name: "ping", Description: "returns pong"},
+		func(_ agent.Context, _ struct{}) (string, error) { return "pong", nil })
+	if err != nil {
+		t.Fatalf("functiontool.New() error = %v", err)
+	}
+
+	m := &toolLoopModel{rounds: 6, tokens: 5000}
+	root, err := llmagent.New(llmagent.Config{Name: "assistant", Model: m, Tools: []tool.Tool{ping}})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	summarizer := &recordingSummarizer{summary: "SUMMARY"}
+	r, err := New(Config{
+		AppName:           "compaction_app",
+		Agent:             root,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+		EventsCompactionConfig: &compaction.Config{
+			TokenThreshold:     1000,
+			EventRetentionSize: 2,
+			Summarizer:         summarizer,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}))
+
+	// One attempt is right: it is worth trying once. Repeating is not, because
+	// the reported prompt never falls.
+	if got := summarizer.calls(); got > 1 {
+		t.Errorf("summarizer ran %d times in one turn while the prompt never shrank, want at most 1", got)
+	}
+	if m.calls < 3 {
+		t.Fatalf("the model only ran %d times, so the tool loop did not happen and this proved nothing", m.calls)
+	}
+}

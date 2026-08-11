@@ -46,7 +46,17 @@ type TokenCounter func(events []*session.Event) int
 // which is what lets it react to a single long turn rather than waiting for the
 // turn to end. Callers must run it before assembling contents so the fresh
 // summary is reflected in the request.
-func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Session, estimate TokenCounter) (*session.Event, error) {
+// ProgressGate decides whether another compaction at a given prompt size is
+// worth attempting, and remembers the ones that happen.
+//
+// It exists so the caller can stop compaction repeating uselessly within one
+// turn without this package needing to know what an invocation is.
+type ProgressGate interface {
+	AllowAt(tokens int) bool
+	RecordAt(tokens int)
+}
+
+func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Session, estimate TokenCounter, progress ProgressGate) (*session.Event, error) {
 	if !HasTailRetention(cfg) {
 		return nil, nil
 	}
@@ -63,6 +73,14 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		return nil, nil
 	}
 
+	// Stop here when the last compaction in this turn did not shrink the prompt.
+	// Compacting again would summarize a little more and leave the prompt just
+	// as far over the threshold, paying for a model call each time.
+	if progress != nil && !progress.AllowAt(tokens) {
+		traceDeclined(ctx, cfg, sess, telemetry.CompactionTriggerTokenThreshold, "the previous compaction did not reduce the prompt")
+		return nil, nil
+	}
+
 	window := selectTailRetentionWindow(events, cfg.EventRetentionSize)
 	if len(window) == 0 {
 		// The threshold is crossed and nothing can be summarized: the retained
@@ -74,6 +92,9 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		return nil, nil
 	}
 
+	if progress != nil {
+		progress.RecordAt(tokens)
+	}
 	summary, err := summarizeTraced(ctx, cfg, sess, telemetry.CompactionTriggerTokenThreshold, window)
 	if err != nil {
 		return nil, fmt.Errorf("tail-retention summarization failed: %w", err)
@@ -106,7 +127,18 @@ func promptTokenCount(events []*session.Event, estimate TokenCounter) (int, bool
 			continue
 		}
 		if usage := events[i].UsageMetadata; usage != nil && usage.PromptTokenCount > 0 {
-			return int(usage.PromptTokenCount), true
+			// Add an estimate for everything appended since that count was
+			// reported. The reported number describes the prompt of an earlier
+			// call, so on its own it lags by however much the turn has grown:
+			// in a tool loop that is every call and response since, which is
+			// exactly the growth compaction exists to catch. The call that
+			// first crosses the threshold would otherwise be invisible until
+			// the next one.
+			tokens := int(usage.PromptTokenCount)
+			if estimate != nil && i < len(events)-1 {
+				tokens += estimate(events[i+1:])
+			}
+			return tokens, true
 		}
 	}
 	if estimate == nil {

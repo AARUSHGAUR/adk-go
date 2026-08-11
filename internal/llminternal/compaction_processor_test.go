@@ -87,10 +87,7 @@ func tailRetentionFixture(t *testing.T, n int) (session.Service, session.Session
 func runCompactionProcessor(t *testing.T, svc session.Service, sess session.Session, cfg *compaction.Config) error {
 	t.Helper()
 
-	ctx := compactionctx.ToContext(t.Context(), &compactionctx.Runtime{
-		Config:         cfg,
-		SessionService: svc,
-	})
+	ctx := compactionctx.ToContext(t.Context(), compactionctx.New(cfg, svc))
 	testAgent := utils.Must(llmagent.New(llmagent.Config{Name: "assistant", Model: &testModel{}}))
 	ictx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Agent:   testAgent,
@@ -165,14 +162,11 @@ func TestCompactionProcessorSkipsOnCancelledContext(t *testing.T) {
 	summarizer := &fixedSummarizer{}
 
 	ctx, cancel := context.WithCancel(t.Context())
-	ctx = compactionctx.ToContext(ctx, &compactionctx.Runtime{
-		Config: &compaction.Config{
-			TokenThreshold:     100,
-			EventRetentionSize: 2,
-			Summarizer:         summarizer,
-		},
-		SessionService: svc,
-	})
+	ctx = compactionctx.ToContext(ctx, compactionctx.New(&compaction.Config{
+		TokenThreshold:     100,
+		EventRetentionSize: 2,
+		Summarizer:         summarizer,
+	}, svc))
 	testAgent := utils.Must(llmagent.New(llmagent.Config{Name: "assistant", Model: &testModel{}}))
 	ictx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Agent:   testAgent,

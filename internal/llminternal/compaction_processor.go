@@ -64,7 +64,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		if ctx.Err() != nil {
 			return
 		}
-		summary, err := compactioninternal.TailRetention(ctx, rt.Config, sess, promptTokenEstimator(ctx))
+		summary, err := compactioninternal.TailRetention(ctx, rt.Config(), sess, promptTokenEstimator(ctx), rt)
 		if err != nil {
 			degrade(ctx, "token-threshold", err)
 			return
@@ -84,7 +84,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		if ctx.Err() != nil {
 			return
 		}
-		latest, err := compactioninternal.ReloadSession(ctx, rt.SessionService, sess)
+		latest, err := compactioninternal.ReloadSession(ctx, rt.SessionService(), sess)
 		if err != nil {
 			// Same reasoning as a failed summarization: this is bookkeeping in
 			// the middle of a turn whose tools may already have run. Failing to
@@ -98,7 +98,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 			return
 		}
 
-		if err := rt.SessionService.AppendEvent(ctx, sess, summary); err != nil {
+		if err := rt.SessionService().AppendEvent(ctx, sess, summary); err != nil {
 			degrade(ctx, "failed to append the summary event", err)
 			return
 		}

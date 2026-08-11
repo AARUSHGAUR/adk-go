@@ -76,9 +76,7 @@ func compactionInvocationCtx(t *testing.T, agentName string, events []*session.E
 
 	ctx := t.Context()
 	if configured {
-		ctx = compactionctx.ToContext(ctx, &compactionctx.Runtime{
-			Config: &compaction.Config{CompactionInterval: 1},
-		})
+		ctx = compactionctx.ToContext(ctx, compactionctx.New(&compaction.Config{CompactionInterval: 1}, nil))
 	}
 	testAgent := utils.Must(llmagent.New(llmagent.Config{Name: agentName, Model: &testModel{}}))
 	return icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
