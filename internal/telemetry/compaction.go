@@ -59,6 +59,9 @@ var (
 	genAICompactionResultEventID  = attribute.Key("gen_ai.compaction.result_event_id")
 	genAICompactionStartTimestamp = attribute.Key("gen_ai.compaction.start_timestamp")
 	genAICompactionEndTimestamp   = attribute.Key("gen_ai.compaction.end_timestamp")
+	genAICompactionInvocationID   = attribute.Key("gcp.vertex.agent.invocation_id")
+	genAICompactionInputTokens    = attribute.Key("gen_ai.usage.input_tokens")
+	genAICompactionOutputTokens   = attribute.Key("gen_ai.usage.output_tokens")
 )
 
 // StartCompactEventsSpanParams contains parameters for [StartCompactEventsSpan].
@@ -71,6 +74,10 @@ type StartCompactEventsSpanParams struct {
 	Trigger string
 	// SessionID is the session whose history is being compacted.
 	SessionID string
+	// InvocationID is the turn that triggered the compaction, or "" when it is
+	// not known. The span is not a child of the turn's span, so without this
+	// there is no way to ask which turn a compaction belonged to.
+	InvocationID string
 	// SummarizerType is the bare type name of the summarizer in use.
 	SummarizerType string
 	// Backend is the Google backend the summarizer's model talks to, used to
@@ -106,6 +113,9 @@ func StartCompactEventsSpan(ctx context.Context, params StartCompactEventsSpanPa
 		genAICompactionTrigger.String(params.Trigger),
 		genAICompactionSummarizerType.String(params.SummarizerType),
 		genAICompactionEventCount.Int(params.EventCount),
+	}
+	if params.InvocationID != "" {
+		attrs = append(attrs, genAICompactionInvocationID.String(params.InvocationID))
 	}
 	// gen_ai.system names the system that produced the summary. The values come
 	// from this repo's semconv version, which prefixes them "gcp."; adk-python
@@ -161,6 +171,17 @@ func TraceCompactionResult(span trace.Span, params TraceCompactionResultParams) 
 	ev := params.ResultEvent
 	if ev == nil || ev.Actions.Compaction == nil {
 		return
+	}
+	// The summarizer's own token usage. Compaction spends a model call to save
+	// tokens later, and without this the span cannot say what it spent, so
+	// nobody can tell a compaction that paid for itself from one that did not.
+	if u := ev.LLMResponse.UsageMetadata; u != nil {
+		if u.PromptTokenCount > 0 {
+			span.SetAttributes(genAICompactionInputTokens.Int(int(u.PromptTokenCount)))
+		}
+		if u.CandidatesTokenCount > 0 {
+			span.SetAttributes(genAICompactionOutputTokens.Int(int(u.CandidatesTokenCount)))
+		}
 	}
 	span.SetAttributes(
 		genAICompactionResultEventID.String(ev.ID),

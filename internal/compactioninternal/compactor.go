@@ -86,9 +86,18 @@ func summarizeTraced(ctx context.Context, cfg *compaction.Config, sess session.S
 	if sess != nil {
 		sessionID = sess.ID()
 	}
+	// The turn that triggered this compaction, taken from the newest event in
+	// the session. The span is not a child of that turn's span, so without an
+	// attribute there is no way to ask which turn a compaction belonged to.
+	//
+	// The newest event rather than the newest one in the window: the window is
+	// what is being summarized, which for tail retention deliberately excludes
+	// the turn in progress, and it is that turn we want to name.
+	invocationID := latestInvocationID(sess)
 	ctx, span := telemetry.StartCompactEventsSpan(ctx, telemetry.StartCompactEventsSpanParams{
 		Trigger:            trigger,
 		SessionID:          sessionID,
+		InvocationID:       invocationID,
 		SummarizerType:     summarizerTypeName(cfg.Summarizer),
 		Backend:            summarizerBackend(cfg.Summarizer),
 		EventCount:         len(window),
@@ -206,4 +215,15 @@ func summarizerBackend(s compaction.Summarizer) genai.Backend {
 		return v.GetGoogleLLMVariant()
 	}
 	return genai.BackendUnspecified
+}
+
+// latestInvocationID returns the invocation of the newest event in sess.
+func latestInvocationID(sess session.Session) string {
+	events := collect(sess)
+	for i := len(events) - 1; i >= 0; i-- {
+		if id := events[i].InvocationID; id != "" {
+			return id
+		}
+	}
+	return ""
 }

@@ -104,7 +104,8 @@ func TestSlidingWindowEmitsSpan(t *testing.T) {
 	if a["gen_ai.compaction.overlap_size"].AsInt64() != 1 {
 		t.Errorf("overlap_size = %d, want 1", a["gen_ai.compaction.overlap_size"].AsInt64())
 	}
-	// Only the strategy that fired should be described.
+	// Only the knobs of the configured strategy appear. This says nothing
+	// about which strategy produced the span; the trigger attribute does.
 	if _, ok := a["gen_ai.compaction.token_threshold"]; ok {
 		t.Error("token_threshold attribute is present on a sliding-window span, want it omitted")
 	}
@@ -361,4 +362,62 @@ func TestCompactionSpanRecordsGenAISystem(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCompactionSpanCarriesInvocationAndUsage pins the two attributes that let
+// a compaction span be joined to the turn that caused it and costed.
+//
+// The span is not a child of the turn's span, so without the invocation id
+// there is no way to ask which turn a compaction belonged to. And compaction
+// spends a model call in order to save tokens later, so a span that does not
+// record what it spent cannot show whether it paid for itself.
+func TestCompactionSpanCarriesInvocationAndUsage(t *testing.T) {
+	exp := spanRecorder(t)
+
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
+		textEvent("c", "inv2", 3, "q2"), modelTextEvent("d", "inv2", 4, "a2"),
+	}
+	cfg := &compaction.Config{
+		CompactionInterval: 2,
+		Summarizer: &usageSummarizer{
+			fakeSummarizer: fakeSummarizer{summary: "SUM"},
+			prompt:         1234,
+			output:         56,
+		},
+	}
+
+	if _, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events}); err != nil {
+		t.Fatalf("SlidingWindow() error = %v", err)
+	}
+	a := attrs(exp.GetSpans()[0].Attributes)
+
+	if got := a["gcp.vertex.agent.invocation_id"].AsString(); got != "inv2" {
+		t.Errorf("invocation_id = %q, want the turn that triggered compaction (%q)", got, "inv2")
+	}
+	if got := a["gen_ai.usage.input_tokens"].AsInt64(); got != 1234 {
+		t.Errorf("input_tokens = %d, want 1234", got)
+	}
+	if got := a["gen_ai.usage.output_tokens"].AsInt64(); got != 56 {
+		t.Errorf("output_tokens = %d, want 56", got)
+	}
+}
+
+// usageSummarizer reports token usage the way a real one does.
+type usageSummarizer struct {
+	fakeSummarizer
+	prompt int32
+	output int32
+}
+
+func (s *usageSummarizer) SummarizeEvents(ctx context.Context, events []*session.Event) (*session.Event, error) {
+	ev, err := s.fakeSummarizer.SummarizeEvents(ctx, events)
+	if err != nil || ev == nil {
+		return ev, err
+	}
+	ev.LLMResponse.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     s.prompt,
+		CandidatesTokenCount: s.output,
+	}
+	return ev, nil
 }
