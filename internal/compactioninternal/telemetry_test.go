@@ -17,9 +17,11 @@ package compactioninternal
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -420,4 +422,46 @@ func (s *usageSummarizer) SummarizeEvents(ctx context.Context, events []*session
 		CandidatesTokenCount: s.output,
 	}
 	return ev, nil
+}
+
+// TestCompactionSpanAttributeKeySet pins the exact set of attribute keys.
+//
+// The keys are a contract shared with adk-python, and the individual assertions
+// elsewhere only check the keys they name. Adding, renaming or dropping one
+// would otherwise pass unnoticed until a dashboard written against the other
+// implementation stopped matching.
+func TestCompactionSpanAttributeKeySet(t *testing.T) {
+	exp := spanRecorder(t)
+
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
+		textEvent("c", "inv2", 3, "q2"), modelTextEvent("d", "inv2", 4, "a2"),
+	}
+	cfg := &compaction.Config{CompactionInterval: 2, OverlapSize: 1, Summarizer: &fakeSummarizer{summary: "SUM"}}
+
+	if _, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events}); err != nil {
+		t.Fatalf("SlidingWindow() error = %v", err)
+	}
+
+	want := []string{
+		"gcp.vertex.agent.invocation_id",
+		"gen_ai.compaction.compaction_interval",
+		"gen_ai.compaction.end_timestamp",
+		"gen_ai.compaction.event_count",
+		"gen_ai.compaction.overlap_size",
+		"gen_ai.compaction.result_event_id",
+		"gen_ai.compaction.start_timestamp",
+		"gen_ai.compaction.summarizer_type",
+		"gen_ai.compaction.trigger",
+		"gen_ai.conversation.id",
+		"gen_ai.operation.name",
+	}
+	var got []string
+	for k := range attrs(exp.GetSpans()[0].Attributes) {
+		got = append(got, k)
+	}
+	slices.Sort(got)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("attribute key set mismatch (-want +got):\n%s\nthese keys are shared with adk-python; change them together", diff)
+	}
 }

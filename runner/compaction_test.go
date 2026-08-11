@@ -26,8 +26,12 @@ import (
 
 	"google.golang.org/genai"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
@@ -892,4 +896,49 @@ func textOfContent(c *genai.Content) string {
 		}
 	}
 	return b.String()
+}
+
+// TestCompactionSpanJoinsTheCallersTrace checks that compaction is traced
+// alongside the turn rather than in a trace of its own.
+//
+// Compaction runs after the invocation has finished, so it is not a child of
+// the turn's span and should not pretend to be: the turn has ended by then.
+// What it must do is stay in the same trace, so the two are visible together,
+// and name the invocation so they can be joined.
+func TestCompactionSpanJoinsTheCallersTrace(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	telemetry.OverrideTracerForTesting(t, tp)
+
+	const userID, sessionID = "u", "s"
+	r, _ := newCompactionRunner(t, &scriptedModel{replyFmt: "answer %d"}, &compaction.Config{
+		CompactionInterval: 1,
+		Summarizer:         &recordingSummarizer{summary: "SUMMARY"},
+	})
+
+	// A caller that traces its own work, which is the normal case in a server.
+	ctx, outer := tp.Tracer("test").Start(t.Context(), "caller")
+	drain(t, r.Run(ctx, userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}))
+	outer.End()
+
+	var compaction, turn bool
+	traces := map[string]bool{}
+	for _, sp := range exp.GetSpans() {
+		traces[sp.SpanContext.TraceID().String()] = true
+		if strings.HasPrefix(sp.Name, "compact_events") {
+			compaction = true
+			if !sp.Parent.IsValid() {
+				t.Error("the compaction span has no parent, so it escaped the caller's trace")
+			}
+		}
+		if strings.HasPrefix(sp.Name, "invoke_agent") {
+			turn = true
+		}
+	}
+	if !compaction || !turn {
+		t.Fatalf("missing spans: compaction=%v turn=%v", compaction, turn)
+	}
+	if len(traces) != 1 {
+		t.Errorf("spans span %d traces, want 1: compaction is not in the same trace as the turn", len(traces))
+	}
 }

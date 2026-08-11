@@ -98,14 +98,18 @@ type StartCompactEventsSpanParams struct {
 // StartCompactEventsSpan starts a span covering one context-compaction
 // summarization, named "compact_events <trigger>".
 //
-// The span name and the gen_ai.compaction.* attribute keys are part of ADK's
-// cross-language telemetry contract, so a dashboard or query written against
-// one ADK implementation works against the others. Renaming them here breaks
-// that, so treat them as fixed.
+// The span name and the gen_ai.compaction.* attribute keys match adk-python,
+// which was read from source rather than assumed: the ten keys, the span name
+// and the operation name are identical there. Nothing enforces that agreement,
+// so treat them as fixed and change them only alongside the other
+// implementations. adk-kotlin has no compaction telemetry at all today, so
+// "cross-language" here means two implementations, not all of them.
 //
-// The span wraps only the summarizer call, so its presence in a trace means
-// compaction really ran. A run that evaluated a trigger and declined produces
-// no span, which keeps the signal meaningful.
+// The span wraps the summarizer call rather than the whole compaction. What
+// precedes it is an in-memory scan and window selection, microseconds against a
+// model call, and starting the span earlier would emit one for every evaluation
+// that declines. A span therefore means compaction really ran, which is the
+// more useful signal.
 func StartCompactEventsSpan(ctx context.Context, params StartCompactEventsSpanParams) (context.Context, trace.Span) {
 	attrs := []attribute.KeyValue{
 		semconv.GenAIOperationNameKey.String(compactEventsName),
