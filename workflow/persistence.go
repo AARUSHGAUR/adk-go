@@ -15,13 +15,13 @@
 package workflow
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -158,7 +158,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 					continue
 				}
 				sf := scanFor(owner)
-				sf.resolved[fr.ID] = unwrapResponse(fr.Response)
+				sf.resolved[fr.ID] = utils.UnwrapResponse(fr.Response)
 				sf.resolvedCount[fr.ID]++
 			}
 			continue
@@ -499,31 +499,4 @@ func schemaFromEvent(ev *session.Event, id string) *jsonschema.Schema {
 		}
 	}
 	return nil
-}
-
-// unwrapResponse extracts the original value from a FunctionResponse
-// payload. A sole single-key wrapper — {"result": v} (adk-python),
-// {"response": v} or {"payload": v} (adk-go) — is unwrapped, with
-// string values JSON-parsed when possible; anything else passes
-// through. Mirrors adk-python _unwrap_response, extended with the
-// adk-go keys for cross-runtime sessions.
-func unwrapResponse(data map[string]any) any {
-	if len(data) != 1 {
-		return data
-	}
-	for _, key := range []string{"result", "response", "payload"} {
-		v, ok := data[key]
-		if !ok {
-			continue
-		}
-		if s, isStr := v.(string); isStr {
-			var parsed any
-			if err := json.Unmarshal([]byte(s), &parsed); err == nil {
-				return parsed
-			}
-			return s
-		}
-		return v
-	}
-	return data
 }

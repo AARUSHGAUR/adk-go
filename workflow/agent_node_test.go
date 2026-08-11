@@ -19,6 +19,7 @@ import (
 	"errors"
 	"iter"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -832,114 +833,238 @@ func TestAgentNode_AutomaticOutputExtraction(t *testing.T) {
 	}
 }
 
-// TestNodeIsResuming_InvocationScope pins resume detection scoping to the
-// current invocation and the node's own agent.
-func TestNodeIsResuming_InvocationScope(t *testing.T) {
-	const agentName = "worker"
-	raise := func(inv, author, id string) *session.Event {
-		return &session.Event{InvocationID: inv, Author: author, LongRunningToolIDs: []string{id}}
-	}
-	answer := func(inv, id string) *session.Event {
-		ev := &session.Event{InvocationID: inv, Author: "user"}
-		ev.LLMResponse.Content = &genai.Content{
-			Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: id}}},
-		}
-		return ev
-	}
-
-	tests := []struct {
-		name         string
-		events       sliceEvents
-		invocationID string
-		want         bool
-	}{
-		{
-			name:         "answered in current invocation is a resume",
-			events:       sliceEvents{raise("inv1", agentName, "A"), answer("inv1", "A")},
-			invocationID: "inv1",
-			want:         true,
-		},
-		{
-			// A finished cycle stays in history but must not resume inv2.
-			name:         "answered only in a prior invocation is not a resume",
-			events:       sliceEvents{raise("inv1", agentName, "A"), answer("inv1", "A")},
-			invocationID: "inv2",
-			want:         false,
-		},
-		{
-			name:         "raised but unanswered is not a resume",
-			events:       sliceEvents{raise("inv1", agentName, "A")},
-			invocationID: "inv1",
-			want:         false,
-		},
-		{
-			name:         "interrupt raised by another node is not this node's resume",
-			events:       sliceEvents{raise("inv1", "other", "A"), answer("inv1", "A")},
-			invocationID: "inv1",
-			want:         false,
-		},
-		{
-			// Nested delegation: the interrupt is authored by a sub-agent, not
-			// this node's agent, so author scoping excludes it (see nodeIsResuming).
-			name: "delegated sub-agent's interrupt is not the coordinator's resume",
-			events: sliceEvents{
-				{InvocationID: "inv1", Author: agentName},
-				raise("inv1", "subagent", "A"),
-				answer("inv1", "A"),
-			},
-			invocationID: "inv1",
-			want:         false,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			sess := &eventsSession{events: tc.events}
-			if got := nodeIsResuming(sess, tc.invocationID, agentName); got != tc.want {
-				t.Errorf("nodeIsResuming(_, %q, %q) = %v, want %v", tc.invocationID, agentName, got, tc.want)
-			}
-		})
-	}
+// resumeProbeAgent records the user content of every activation and, on its
+// first one, raises a long-running interrupt authored by author (a sub-agent
+// name exercises attribution beyond the node's own agent).
+type resumeProbeAgent struct {
+	mu       sync.Mutex
+	inputs   []*genai.Content
+	author   string
+	routes   []string
+	interrID string
 }
 
-// TestNewAgentNode_RerunOnResumeDefault pins the isLlmAgent-gated default:
-// a non-LlmAgent node gets no default, and an explicit value always wins.
-func TestNewAgentNode_RerunOnResumeDefault(t *testing.T) {
-	nonLLM, err := agent.New(agent.Config{
-		Name: "plain",
-		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
-			return func(func(*session.Event, error) bool) {}
+func (p *resumeProbeAgent) new(t *testing.T, name string) agent.Agent {
+	t.Helper()
+	a, err := agent.New(agent.Config{
+		Name: name,
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				p.mu.Lock()
+				n := len(p.inputs)
+				p.inputs = append(p.inputs, ctx.UserContent())
+				p.mu.Unlock()
+
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = name
+				if p.author != "" {
+					ev.Author = p.author
+				}
+				if n == 0 && p.interrID != "" {
+					ev.LongRunningToolIDs = []string{p.interrID}
+				} else {
+					ev.Output = "out"
+				}
+				if n < len(p.routes) {
+					ev.Routes = []string{p.routes[n]}
+				}
+				yield(ev, nil)
+			}
 		},
 	})
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
 	}
-	rerunTrue, rerunFalse := true, false
+	return a
+}
 
-	tests := []struct {
-		name string
-		cfg  NodeConfig
-		want *bool
-	}{
-		{name: "non-LlmAgent gets no default", cfg: NodeConfig{}, want: nil},
-		{name: "explicit true wins", cfg: NodeConfig{RerunOnResume: &rerunTrue}, want: &rerunTrue},
-		{name: "explicit false wins", cfg: NodeConfig{RerunOnResume: &rerunFalse}, want: &rerunFalse},
+func (p *resumeProbeAgent) activation(t *testing.T, i int) *genai.Content {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if i >= len(p.inputs) {
+		t.Fatalf("activation %d missing; node ran %d time(s)", i+1, len(p.inputs))
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			node, err := NewAgentNode(nonLLM, tc.cfg)
+	return p.inputs[i]
+}
+
+// answeredEvent is a user turn answering interrupt id.
+func answeredEvent(invocationID, id string) *session.Event {
+	ev := &session.Event{InvocationID: invocationID, Author: "user"}
+	ev.LLMResponse.Content = &genai.Content{
+		Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: id, Response: map[string]any{"response": "ok"}}}},
+	}
+	return ev
+}
+
+// TestAgentNode_LoopBackKeepsInput pins that only the resume activation drops
+// the node input: a node re-activated by a loop-back edge later in the same
+// invocation starts a fresh lifecycle and must still receive its input.
+func TestAgentNode_LoopBackKeepsInput(t *testing.T) {
+	const name = "looper"
+	probe := &resumeProbeAgent{routes: []string{"loop", "finish"}}
+	node, err := NewAgentNode(probe.new(t, name), NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	finish := newRecordingNode("Finish")
+	finish.release()
+
+	w := mustNew(t, []Edge{
+		{From: Start, To: node},
+		{From: node, To: node, Route: StringRoute("loop")},
+		{From: node, To: finish, Route: StringRoute("finish")},
+	})
+
+	// An interrupt of this node's, answered in the current invocation: a
+	// history scan would latch on it and starve every later activation.
+	ctx := newSeededMockCtx(t)
+	ctx.sess = &eventsSession{events: sliceEvents{
+		{InvocationID: "test-invocation-id", Author: name, LongRunningToolIDs: []string{"X"}},
+		answeredEvent("test-invocation-id", "X"),
+	}}
+
+	for _, err := range w.Run(ctx) {
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	}
+	if got := probe.activation(t, 1); got == nil {
+		t.Error("loop-back activation got no input, want the routed input")
+	}
+}
+
+// TestAgentNode_ResumesOnSubAgentInterrupt pins that a pause raised by a
+// sub-agent the node's agent delegated to still counts as the node's own
+// resume: the engine attributes it to the node and re-enters it, so Run must
+// drop the input rather than re-feed it and re-trigger the pending tool.
+func TestAgentNode_ResumesOnSubAgentInterrupt(t *testing.T) {
+	const (
+		name        = "coord"
+		invocation  = "test-invocation-id"
+		interruptID = "X"
+	)
+	probe := &resumeProbeAgent{author: "subagent", interrID: interruptID}
+	rerun := true
+	node, err := NewAgentNode(probe.new(t, name), NodeConfig{RerunOnResume: &rerun})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	producer := newStubNode("producer", "task-input")
+	w := mustNew(t, []Edge{{From: Start, To: producer}, {From: producer, To: node}})
+
+	ctx1 := newSeededMockCtx(t)
+	ctx1.sess = &eventsSession{events: sliceEvents{}}
+	var history sliceEvents
+	for ev, err := range w.Run(ctx1) {
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if ev.InvocationID == "" {
+			ev.InvocationID = invocation
+		}
+		history = append(history, ev)
+	}
+	history = append(history, answeredEvent(invocation, interruptID))
+
+	sess := &eventsSession{events: history}
+	state, err := w.ReconstructRunState(sess, invocation)
+	if err != nil {
+		t.Fatalf("ReconstructRunState: %v", err)
+	}
+	if state == nil {
+		t.Fatal("the sub-agent's interrupt was not attributed to the node")
+	}
+	ctx2 := newSeededMockCtx(t)
+	ctx2.sess = sess
+	for _, err := range w.Resume(agent.NewContext(ctx2), state, map[string]any{interruptID: "ok"}) {
+		if err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+	}
+	if got := probe.activation(t, 1); got != nil {
+		t.Errorf("resume activation got input %v, want none (continue from history)", got)
+	}
+}
+
+// TestAgentNode_FreshDynamicChildKeepsInput pins the other side of resume
+// detection: a dynamic child inherits the resume context of the ancestor that
+// paused, but a child that never paused is a fresh run and keeps its input.
+func TestAgentNode_FreshDynamicChildKeepsInput(t *testing.T) {
+	const (
+		invocation  = "test-invocation-id"
+		interruptID = "ask-1"
+	)
+	probe := &resumeProbeAgent{}
+	childNode, err := NewAgentNode(probe.new(t, "child"), NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	asker := &resumeAskerNode{BaseNode: NewBaseNode("asker", "", NodeConfig{}), id: interruptID}
+
+	orchestrator := NewDynamicNode[any, string]("orch",
+		func(nc agent.Context, _ any, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[any](nc, asker, nil); err != nil {
+				return "", err
+			}
+			out, err := RunNode[any](nc, childNode, "fresh-child-input")
 			if err != nil {
-				t.Fatalf("NewAgentNode: %v", err)
+				return "", err
 			}
-			switch got := node.Config().RerunOnResume; {
-			case tc.want == nil:
-				if got != nil {
-					t.Errorf("RerunOnResume = %v, want nil", *got)
-				}
-			case got == nil:
-				t.Errorf("RerunOnResume = nil, want %v", *tc.want)
-			case *got != *tc.want:
-				t.Errorf("RerunOnResume = %v, want %v", *got, *tc.want)
-			}
-		})
+			s, _ := out.(string)
+			return s, nil
+		}, NodeConfig{})
+
+	w := mustNew(t, []Edge{{From: Start, To: orchestrator}})
+
+	ctx1 := newSeededMockCtx(t)
+	ctx1.sess = &eventsSession{events: sliceEvents{}}
+	var history sliceEvents
+	for ev, err := range w.Run(ctx1) {
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if ev.InvocationID == "" {
+			ev.InvocationID = invocation
+		}
+		history = append(history, ev)
+	}
+	history = append(history, answeredEvent(invocation, interruptID))
+
+	sess := &eventsSession{events: history}
+	state, err := w.ReconstructRunState(sess, invocation)
+	if err != nil {
+		t.Fatalf("ReconstructRunState: %v", err)
+	}
+	if state == nil {
+		t.Fatal("no run state rehydrated")
+	}
+	ctx2 := newSeededMockCtx(t)
+	ctx2.sess = sess
+	for _, err := range w.Resume(agent.NewContext(ctx2), state, map[string]any{interruptID: "ok"}) {
+		if err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+	}
+	if got := probe.activation(t, 0); got == nil {
+		t.Error("freshly delegated child got no input, want the delegated input")
+	}
+}
+
+// resumeAskerNode pauses once on its interrupt, then returns the reply.
+type resumeAskerNode struct {
+	BaseNode
+	id string
+}
+
+func (n *resumeAskerNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if resp, ok := ctx.ResumedInput(n.id); ok {
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Output = resp
+			yield(ev, nil)
+			return
+		}
+		yield(NewRequestInputEvent(ctx, session.RequestInput{InterruptID: n.id, Message: "?"}), nil)
 	}
 }

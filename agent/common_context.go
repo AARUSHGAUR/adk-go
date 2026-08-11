@@ -240,6 +240,17 @@ func (c *commonContext) ResumedInput(interruptID string) (any, bool) {
 	return c.invocationContext.ResumedInput(interruptID)
 }
 
+// IsResumeActivation reports whether this context belongs to an activation
+// started to resume a paused node: the workflow engine injects the resolved
+// interrupt responses only then. A later activation of the same node in the
+// same invocation (loop-back edge, retry, per-item fan-out) is a fresh
+// lifecycle and reports false.
+//
+// Not on [Context] — read it through an optional-interface assertion.
+func (c *commonContext) IsResumeActivation() bool {
+	return c.resumeInputs != nil
+}
+
 // RunConfig implements [InvocationContext].
 func (c *commonContext) RunConfig() *RunConfig {
 	return c.invocationContext.RunConfig()

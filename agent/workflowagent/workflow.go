@@ -15,11 +15,8 @@
 package workflowagent
 
 import (
-	"encoding/json"
 	"fmt"
 	"iter"
-
-	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
@@ -152,42 +149,11 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 		if fr == nil || fr.ID == "" {
 			continue
 		}
-		responses[fr.ID] = decodeResumeResponse(fr)
+		responses[fr.ID] = utils.UnwrapResponse(fr.Response)
 	}
 	if len(responses) == 0 {
 		return nil, nil, false, nil
 	}
 
 	return responses, state, true, nil
-}
-
-// decodeResumeResponse extracts the user-supplied payload from a
-// FunctionResponse that answers a paused node's interrupt — a workflow input
-// (adk_request_input), tool consent (adk_request_credential), or confirmation
-// (adk_request_confirmation). detectResume matches by interrupt ID, so this is
-// no longer specific to workflow input.
-//
-// Three accepted shapes, in priority order:
-//
-//  1. {"response": <value>}  — when value is a string, it is
-//     parsed as JSON and the result returned; if the string is
-//     not valid JSON it is returned verbatim. When value is any
-//     other type, it is returned as-is.
-//  2. {"payload": <any>}     — value returned verbatim.
-//  3. anything else           — the whole Response map is returned.
-func decodeResumeResponse(fr *genai.FunctionResponse) any {
-	if raw, ok := fr.Response["response"]; ok {
-		if s, isStr := raw.(string); isStr {
-			var decoded any
-			if err := json.Unmarshal([]byte(s), &decoded); err == nil {
-				return decoded
-			}
-			return s
-		}
-		return raw
-	}
-	if payload, ok := fr.Response["payload"]; ok {
-		return payload
-	}
-	return fr.Response
 }

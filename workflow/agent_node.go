@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -25,7 +26,6 @@ import (
 	"google.golang.org/adk/v2/agent"
 	internalcontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
-	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -107,7 +107,7 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		// On resume, re-feeding the input would make a single_turn/task
 		// LlmAgent re-call the still-pending tool and pause again; drop it
 		// so the agent continues from history. Mirrors runner.runAgentNodeBody.
-		if nodeIsResuming(ctx.Session(), ctx.InvocationID(), n.agent.Name()) {
+		if n.isResuming(ctx) {
 			input = nil
 		}
 		userContent, err := nodeInputToContent(input)
@@ -183,19 +183,31 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 	}
 }
 
-// nodeIsResuming reports whether this node's agent raised a long-running
-// interrupt that a later FunctionResponse has since answered — i.e. this turn is
-// a HITL resume of THIS node, so Run should drop the node input.
+// isResuming reports whether this activation resumes a pause of THIS node, in
+// which case Run drops the node input so the agent continues from history.
 //
-// The open-interrupt set is scoped to invocationID and to the agent's own events
-// (by author), stricter than the runner's unscoped answeredOpenInterrupts, so a
-// prior run or a sibling node's resume isn't taken for this node's. (A single
-// agent per invocation lets the runner stay unscoped; a graph can't.)
+// Both signals are needed. The scheduler's per-activation resume flag alone
+// over-fires: a dynamic child inherits the resume context of the ancestor that
+// paused, so a freshly delegated child would lose its input. A history scan
+// alone latches: history never un-answers an interrupt, so a later loop-back,
+// retry or per-item activation of the same node would lose its input too.
 //
-// Author scoping means an interrupt raised under a different author — e.g. a
-// sub-agent the coordinator delegated to — is not seen here; that resume rides
-// on the child node's own Run.
-func nodeIsResuming(sess session.Session, invocationID, agentName string) bool {
+// Interrupts are attributed as rehydration attributes them (NodeInfo.Path,
+// Author as the fallback), so a pause raised by a delegated sub-agent counts as
+// this node's — matching the engine, which parks and re-enters the node on
+// exactly those interrupts.
+func (n *AgentNode) isResuming(ctx agent.Context) bool {
+	ra, ok := ctx.(interface{ IsResumeActivation() bool })
+	if !ok || !ra.IsResumeActivation() {
+		return false
+	}
+	return raisedInterrupt(ctx.Session(), ctx.InvocationID(), n.Name())
+}
+
+// raisedInterrupt reports whether nodeName raised a long-running interrupt in
+// invocationID. Runs only on a resume activation, keeping the scan off the
+// normal path.
+func raisedInterrupt(sess session.Session, invocationID, nodeName string) bool {
 	if sess == nil {
 		return false
 	}
@@ -203,31 +215,29 @@ func nodeIsResuming(sess session.Session, invocationID, agentName string) bool {
 	if events == nil {
 		return false
 	}
-	open := map[string]struct{}{}
-	answered := map[string]struct{}{}
 	for i := 0; i < events.Len(); i++ {
 		ev := events.At(i)
-		if ev == nil {
+		if ev == nil || len(ev.LongRunningToolIDs) == 0 {
 			continue
 		}
 		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
-		if ev.Author == agentName {
-			for _, id := range ev.LongRunningToolIDs {
-				if id != "" {
-					open[id] = struct{}{}
-				}
-			}
+		if ev.Author == nodeName {
+			return true
 		}
-		for _, fr := range utils.FunctionResponses(utils.Content(ev)) {
-			if fr != nil && fr.ID != "" {
-				answered[fr.ID] = struct{}{}
-			}
+		if ev.NodeInfo != nil && nodePathHas(ev.NodeInfo.Path, nodeName) {
+			return true
 		}
 	}
-	for id := range open {
-		if _, ok := answered[id]; ok {
+	return false
+}
+
+// nodePathHas reports whether a node path ("parent@1/child@2") has a segment
+// naming nodeName — the segment walk eventNodeName uses for attribution.
+func nodePathHas(path, nodeName string) bool {
+	for _, seg := range strings.Split(path, "/") {
+		if name, _, _ := strings.Cut(seg, "@"); name == nodeName {
 			return true
 		}
 	}
