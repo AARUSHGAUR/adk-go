@@ -15,6 +15,10 @@
 package triggers
 
 import (
+	"bytes"
+	"log"
+	"os"
+	"strings"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
@@ -119,5 +123,34 @@ func TestControllerOptionsToleratesNil(t *testing.T) {
 	c := NewPubSubControllerWithOptions(nil, nil, nil, nil, runner.PluginConfig{}, TriggerConfig{MaxConcurrentRuns: 1}, nil, WithEventsCompactionConfig(cfg))
 	if c.runner.eventsCompactionConfig != cfg {
 		t.Error("a nil option prevented a later option from applying")
+	}
+}
+
+// TestWithEventsCompactionConfigWarnsWhenItCannotFire checks that a
+// sliding-window-only config on a trigger controller says so.
+//
+// Each delivery runs in a session of its own, so history never accumulates and
+// the sliding window, which counts completed invocations within one session,
+// can never reach its interval. Silently doing nothing is the bad outcome here:
+// the operator has configured compaction and will believe it is working.
+func TestWithEventsCompactionConfigWarnsWhenItCannotFire(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	tc := TriggerConfig{MaxConcurrentRuns: 1}
+
+	NewPubSubControllerWithOptions(nil, nil, nil, nil, runner.PluginConfig{}, tc,
+		WithEventsCompactionConfig(&compaction.Config{CompactionInterval: 2}))
+	if !strings.Contains(buf.String(), "never fire") {
+		t.Errorf("no warning for a sliding-window-only config on a trigger surface; log was %q", buf.String())
+	}
+
+	// Tail retention does work here, so it must not warn.
+	buf.Reset()
+	NewPubSubControllerWithOptions(nil, nil, nil, nil, runner.PluginConfig{}, tc,
+		WithEventsCompactionConfig(&compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2}))
+	if strings.Contains(buf.String(), "never fire") {
+		t.Errorf("warned about a tail-retention config, which does fire here; log was %q", buf.String())
 	}
 }

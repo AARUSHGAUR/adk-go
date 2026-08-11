@@ -17,6 +17,7 @@ package triggers
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"math/rand"
 	"net/http"
@@ -56,10 +57,24 @@ type RetriableRunner struct {
 type ControllerOption func(*RetriableRunner)
 
 // WithEventsCompactionConfig enables context compaction for the runners a
-// trigger controller creates, so older session events are summarized and
-// prompts stay small as a conversation grows. See [compaction.Config].
+// trigger controller creates, replacing older session events with summaries.
+//
+// The sliding window reduces prompt size by a constant factor rather than
+// bounding it. Only tail retention bounds growth. See [compaction.Config].
+//
+// Note what a trigger surface is. Each delivery runs in a session of its own,
+// so history never accumulates across messages and the sliding window, which
+// counts completed invocations within one session, can never reach its
+// interval. Tail retention still works, because it measures the prompt inside a
+// single run. Configuring only a sliding window here is almost certainly a
+// mistake, so it is logged rather than silently doing nothing.
 func WithEventsCompactionConfig(cfg *compaction.Config) ControllerOption {
 	return func(r *RetriableRunner) {
+		if cfg != nil && cfg.CompactionInterval > 0 && cfg.TokenThreshold == 0 {
+			log.Printf("adk: sliding-window compaction is configured on a trigger controller, " +
+				"but each delivery runs in a new session, so it will never fire. " +
+				"Use TokenThreshold and EventRetentionSize to compact within a single run.")
+		}
 		r.eventsCompactionConfig = cfg
 	}
 }

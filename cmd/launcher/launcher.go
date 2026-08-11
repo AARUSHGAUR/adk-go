@@ -83,8 +83,10 @@ type Config struct {
 	TelemetryOptions []telemetry.Option
 
 	// EventsCompactionConfig enables context compaction for the sessions the
-	// runners created here drive: older events are periodically summarized so
-	// prompts stay small as a conversation grows. Nil, the default, disables
-	// compaction. See [compaction.Config].
+	// runners created here drive, replacing older events with summaries. Nil,
+	// the default, disables compaction.
+	//
+	// The sliding window reduces prompt size by a constant factor rather than
+	// bounding it. Only tail retention bounds growth. See [compaction.Config].
 	EventsCompactionConfig *compaction.Config
 }
