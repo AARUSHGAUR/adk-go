@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Reports incompatible changes to the module's exported API.
+# Reports incompatible changes to the exported API of the repository's modules.
 #
-# Compares every exported package against a base revision and fails when
-# apidiff calls a change incompatible. Adding to the API is always allowed.
+# Compares every module against a base revision and fails when apidiff calls a
+# change incompatible. Adding to the API is always allowed.
 #
-# Usage: apidiff.sh <base-ref>
+# Usage: apidiff.sh <target-ref>
 #
 # Why this exists: a trailing variadic parameter added to an exported function
 # changes that function's type. Every ordinary call site still compiles, so
@@ -22,49 +22,104 @@ BASE_REF="$(git merge-base HEAD "$TARGET_REF")"
 echo "Target $TARGET_REF, comparing against merge base ${BASE_REF:0:12}"
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+BASE_TREE="$WORK/base"
+cleanup() {
+  git worktree remove --force "$BASE_TREE" >/dev/null 2>&1 || true
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+mkdir -p "$WORK/api"
 
-# Exported packages only. internal/ is not public API, and neither is a package
-# with no importable identifiers.
-packages() {
-  go list ./... | grep -v '/internal/' | grep -v '/internal$'
+# Every module in the repository, as a path relative to the root.
+modules() {
+  find . -not -path '*/.git/*' -name go.mod -exec dirname {} \; | sort
 }
 
-echo "Collecting the API at $BASE_REF"
-BASE_TREE="$WORK/base"
-git worktree add --detach --quiet "$BASE_TREE" "$BASE_REF"
-cleanup_worktree() { git worktree remove --force "$BASE_TREE" >/dev/null 2>&1 || true; }
-trap 'cleanup_worktree; rm -rf "$WORK"' EXIT
+# The module path declared by a directory. GOWORK=off because inside a
+# workspace `go list -m` reports every module in the workspace, not this one.
+module_path() { (cd "$1" && GOWORK=off go list -m); }
 
-mkdir -p "$WORK/api"
+snapshot_for() { echo "$WORK/api/$(echo "$1" | tr '/' '_').api"; }
+
+# apidiff narrates every internal package it skips, on stderr, which buries the
+# one line that says what actually went wrong under eighty that do not.
+report_error() { grep -v '^Ignoring internal package ' "$WORK/err" | sed 's/^/    /' || true; }
+
+# apidiff is asked for a whole module at a time. -m loads every package in the
+# module in one pass and skips internal/ by itself, where invoking it once per
+# package costs minutes on a module this size and reports the same thing.
+#
+# It exits non-zero only when it could not do its job; finding an incompatible
+# change is a successful run that prints to stdout. Keeping those two apart is
+# the difference between "nothing broke" and "nothing was compared", which look
+# identical from the outside.
+failed=0
+breaks=0
+
+echo "Collecting the API at the base revision"
+git worktree add --detach --quiet "$BASE_TREE" "$BASE_REF"
 (
   cd "$BASE_TREE"
   go work init >/dev/null 2>&1 || true
   go work use -r . >/dev/null 2>&1 || true
-  for pkg in $(packages); do
-    # A package that does not build at the base has no baseline to compare
-    # against, which is normal for one this change introduces.
-    apidiff -w "$WORK/api/$(echo "$pkg" | tr '/' '_').api" "$pkg" >/dev/null 2>&1 || true
-  done
 )
 
-echo "Comparing HEAD against it"
-status=0
-for pkg in $(packages); do
-  snapshot="$WORK/api/$(echo "$pkg" | tr '/' '_').api"
-  [ -f "$snapshot" ] || continue   # new package, nothing to break
+while IFS= read -r dir; do
+  mod="$(module_path "$dir")"
+  snap="$(snapshot_for "$mod")"
 
-  out="$(apidiff "$snapshot" "$pkg" 2>/dev/null || true)"
+  # A module this change introduces has no baseline, which is not a problem.
+  if [ ! -d "$BASE_TREE/$dir" ]; then
+    echo "  $mod is new; nothing to compare against"
+    continue
+  fi
+
+  if (cd "$BASE_TREE/$dir" && apidiff -m -w "$snap" "$mod") 2>"$WORK/err"; then
+    echo "  $mod"
+  else
+    echo "  ERROR: could not read the API of $mod at the base revision"
+    report_error
+    failed=1
+  fi
+done < <(modules)
+
+echo "Comparing HEAD against it"
+while IFS= read -r dir; do
+  mod="$(module_path "$dir")"
+  snap="$(snapshot_for "$mod")"
+  [ -f "$snap" ] || continue
+
+  if ! out="$( (cd "$dir" && apidiff -m "$snap" "$mod") 2>"$WORK/err" )"; then
+    echo "  ERROR: could not read the API of $mod at HEAD"
+    report_error
+    failed=1
+    continue
+  fi
+
   # apidiff prints an "Incompatible changes:" section only when there are some.
   if printf '%s' "$out" | grep -q '^Incompatible changes:'; then
     echo
-    echo "=== $pkg ==="
+    echo "=== $mod ==="
     printf '%s\n' "$out" | sed -n '/^Incompatible changes:/,/^$/p'
-    status=1
+    breaks=1
   fi
-done
+done < <(modules)
 
-if [ "$status" -eq 0 ]; then
+# A module that could not be read was not checked at all. Reporting that as a
+# clean run is the one outcome worse than not having the check, so it fails
+# here, and the breaking-change label below does not cover it.
+if [ "$failed" -ne 0 ]; then
+  cat <<'MSG'
+
+The comparison did not complete: the errors above mean some module's API was
+never read, so nothing about it was verified. Fix those before reading this
+check as "no breaking changes".
+MSG
+  exit 1
+fi
+
+if [ "$breaks" -eq 0 ]; then
+  echo "No incompatible changes."
   exit 0
 fi
 
