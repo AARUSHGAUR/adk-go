@@ -64,14 +64,26 @@ for pkg in $(packages); do
   fi
 done
 
-if [ "$status" -ne 0 ]; then
-  cat <<'MSG'
+if [ "$status" -eq 0 ]; then
+  exit 0
+fi
+
+cat <<'MSG'
 
 Incompatible API changes found.
 
-If the break is intended, say so in the pull request description and a
-maintainer can override this check. Note that adding a variadic parameter to an
-existing exported function is a break even though call sites still compile.
+Adding to the API is always allowed; the changes above remove something or
+change its type. Note that adding a variadic parameter to an existing exported
+function counts, even though every call site still compiles.
+
+If the break is deliberate, label the pull request "breaking-change". The
+comparison still runs and still prints what changed, so the break stays on the
+record, but it stops failing the check.
 MSG
+
+if [ "${ALLOW_BREAKING:-false}" = "true" ]; then
+  echo
+  echo 'Labelled "breaking-change", so this is reported rather than enforced.'
+  exit 0
 fi
-exit "$status"
+exit 1

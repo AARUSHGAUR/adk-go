@@ -46,4 +46,10 @@ jobs:
         # the value becomes code; passing it as a quoted variable keeps it data.
         env:
           BASE_REF: ${{ github.base_ref }}
+          # A pull request labelled breaking-change still gets compared, and
+          # still prints what changed, so the break is recorded rather than
+          # waved through invisibly. It just does not fail the check. Without
+          # an escape hatch the only way to land a deliberate break is to
+          # disable the check, which is how checks get removed entirely.
+          ALLOW_BREAKING: ${{ contains(github.event.pull_request.labels.*.name, 'breaking-change') }}
         run: .github/scripts/apidiff.sh "origin/$BASE_REF"
