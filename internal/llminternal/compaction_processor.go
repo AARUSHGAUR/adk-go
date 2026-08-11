@@ -86,7 +86,11 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		}
 		latest, err := compactioninternal.ReloadSession(ctx, rt.SessionService, sess)
 		if err != nil {
-			yield(nil, compactionFailure("token-threshold", err))
+			// Same reasoning as a failed summarization: this is bookkeeping in
+			// the middle of a turn whose tools may already have run. Failing to
+			// re-read means we cannot prove the summary is safe to keep, so it
+			// is dropped, but the turn continues.
+			degrade(ctx, "token-threshold", err)
 			return
 		}
 		if compactioninternal.RangeRaced(latest, sess, summary) {

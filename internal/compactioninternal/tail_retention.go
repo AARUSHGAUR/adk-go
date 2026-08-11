@@ -17,6 +17,7 @@ package compactioninternal
 import (
 	"context"
 	"fmt"
+	"unicode/utf8"
 
 	"google.golang.org/genai"
 
@@ -138,7 +139,7 @@ func EstimateTokensFromContents(contents []*genai.Content) int {
 		}
 		for _, part := range content.Parts {
 			if part != nil {
-				textChars += len(part.Text)
+				textChars += utf8.RuneCountInString(part.Text)
 			}
 		}
 	}
@@ -164,14 +165,29 @@ func selectTailRetentionWindow(events []*session.Event, retentionSize int) []*se
 	}
 
 	latest := LatestCompactionEvent(events)
-	var candidates []*session.Event
-	for _, ev := range events {
-		if hasCompaction(ev) {
-			continue
+
+	// Candidates are the events recorded after the previous compaction, by
+	// stream position rather than by timestamp.
+	//
+	// Timestamps got this wrong at the boundary. The filter excluded anything
+	// not strictly after the previous end, while the new range, seeded with the
+	// previous summary, starts back at the previous start and so covers that
+	// instant. An event stamped exactly at the old end but appended after the
+	// old compaction therefore fell in no window at all and inside the next
+	// recorded range: summarized by nothing, and dropped from every later
+	// prompt. Position has no ties.
+	start := 0
+	if latest != nil {
+		for i, ev := range events {
+			if ev == latest {
+				start = i + 1
+				break
+			}
 		}
-		// Events already covered by the previous summary must not be
-		// summarized again; only what came after it is a candidate.
-		if latest != nil && !ev.Timestamp.After(latest.Actions.Compaction.EndTimestamp) {
+	}
+	var candidates []*session.Event
+	for _, ev := range events[start:] {
+		if hasCompaction(ev) {
 			continue
 		}
 		candidates = append(candidates, ev)
@@ -218,6 +234,11 @@ func selectTailRetentionWindow(events []*session.Event, retentionSize int) []*se
 	// make every summary built on top of it universally visible.
 	prev := latest.Actions.Compaction
 	seed := &session.Event{
+		// Labelled as the previous summary rather than left anonymous. Without
+		// it the seed is indistinguishable from an ordinary model turn, so the
+		// transcript renders a summary as if the agent had said it, and nothing
+		// downstream can tell how many times content has been re-summarized.
+		ID:             "rolling-summary",
 		Author:         "model",
 		Timestamp:      prev.StartTimestamp,
 		Branch:         latest.Branch,

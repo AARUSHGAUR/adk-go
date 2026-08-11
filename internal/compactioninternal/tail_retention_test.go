@@ -17,6 +17,7 @@ package compactioninternal
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -129,9 +130,9 @@ func TestSelectTailRetentionWindow(t *testing.T) {
 				textEvent("e", "inv3", 6, "q3"), modelTextEvent("f", "inv3", 7, "a3"),
 			},
 			retention: 2,
-			// The prior summary is seeded in as "" (a synthetic event with no
+			// The prior summary is seeded in as "rolling-summary" (a synthetic event with no
 			// ID) so the new compaction supersedes it.
-			want: []string{"", "c", "d"},
+			want: []string{"rolling-summary", "c", "d"},
 		},
 	}
 
@@ -530,5 +531,35 @@ func TestSelectTailRetentionWindowStaysInOneScope(t *testing.T) {
 		if ev.Branch != "" || ev.IsolationScope != "" {
 			t.Errorf("event %q carries branch %q scope %q, so the window is not homogeneous", ev.ID, ev.Branch, ev.IsolationScope)
 		}
+	}
+}
+
+// TestSelectTailRetentionWindowKeepsATiedBoundaryEvent checks that an event
+// stamped exactly at the previous compaction's end is not lost.
+//
+// The candidate filter used to exclude anything not strictly after that
+// instant, while the new range, seeded with the previous summary, starts back
+// at the previous start and so covers it. An event on that boundary therefore
+// went into no window and inside the next recorded range: summarized by
+// nothing, and dropped from every prompt afterwards.
+func TestSelectTailRetentionWindowKeepsATiedBoundaryEvent(t *testing.T) {
+	t.Parallel()
+
+	prior := compactionEvent("s1", 3, 1, 3, "EARLIER")
+	// Appended after the compaction, but stamped on its end instant.
+	tied := textEvent("tied", "inv2", 3, "NEVER-SUMMARIZED")
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"),
+		modelTextEvent("b", "inv1", 2, "a1"),
+		prior,
+		tied,
+		textEvent("c", "inv3", 4, "q3"),
+		modelTextEvent("d", "inv3", 5, "a3"),
+		textEvent("e", "inv4", 6, "q4"),
+	}
+
+	window := selectTailRetentionWindow(events, 1)
+	if !slices.Contains(ids(window), "tied") {
+		t.Errorf("window %v does not include the boundary event, so it is covered by the next range without being summarized", ids(window))
 	}
 }

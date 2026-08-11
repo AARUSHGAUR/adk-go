@@ -319,6 +319,15 @@ func RangeRaced(latest, selectedFrom session.Session, summary *session.Event) bo
 
 	for _, ev := range collect(latest) {
 		if hasCompaction(ev) {
+			// A compaction event counts only if it is new. One that was already
+			// present when the window was selected is the boundary this summary
+			// was built from, not a racer. A new one inside the range means
+			// another invocation summarized part of the same span while this
+			// summary was being produced, so recording both would cover the
+			// same turns twice.
+			if _, seen := known[ev.ID]; !seen && inRange(ev, rng) {
+				return true
+			}
 			continue
 		}
 		if ev.Timestamp.Before(rng.StartTimestamp) || ev.Timestamp.After(rng.EndTimestamp) {
@@ -392,4 +401,9 @@ func UnwrapSession(s session.Session) session.Session {
 		}
 		s = inner
 	}
+}
+
+// inRange reports whether ev falls inside rng.
+func inRange(ev *session.Event, rng *session.EventCompaction) bool {
+	return !ev.Timestamp.Before(rng.StartTimestamp) && !ev.Timestamp.After(rng.EndTimestamp)
 }

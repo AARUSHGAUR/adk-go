@@ -109,6 +109,12 @@ func trimToTimestampBoundary(events []*session.Event, length int) int {
 func LatestCompactionEvent(events []*session.Event) *session.Event {
 	var latest *session.Event
 	for i, ev := range events {
+		// hasCompaction, not IsCompactionEvent, deliberately. A record with no
+		// usable content still marks how far compaction reached, so the next
+		// window must start after it. Requiring content here would make the
+		// next window re-summarize everything the broken record covered.
+		// Substitution keys off the stronger predicate, which is what stops a
+		// contentless record from standing in as conversation.
 		if !hasCompaction(ev) {
 			continue
 		}
