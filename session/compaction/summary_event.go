@@ -60,9 +60,24 @@ func NewSummaryEvent(events []*session.Event, summary *genai.Content, usage *gen
 			return nil, fmt.Errorf("events[%d] is nil", i)
 		}
 	}
+	// Chronology is checked across the whole window, not just its ends.
+	//
+	// The range is the closed interval between the first and last event, and
+	// prompt assembly deletes everything inside it. Checking only the endpoints
+	// let an interior event sit past the last one: it was summarized, fell
+	// outside the recorded range, and so survived in the prompt as well, so the
+	// model saw that turn twice.
+	//
+	// Widening the range to cover the true span would be the wrong repair. A
+	// window is a contiguous slice of the session, and stretching its range
+	// past its own endpoints could swallow an event that is not in the window
+	// and was never summarized, turning a duplicate into a deletion.
 	start, end := events[0].Timestamp, events[len(events)-1].Timestamp
-	if end.Before(start) {
-		return nil, fmt.Errorf("events are not in chronological order: first event is at %v, last at %v", start, end)
+	for i := 1; i < len(events); i++ {
+		if events[i].Timestamp.Before(events[i-1].Timestamp) {
+			return nil, fmt.Errorf("events are not in chronological order: events[%d] is at %v, before events[%d] at %v",
+				i, events[i].Timestamp, i-1, events[i-1].Timestamp)
+		}
 	}
 
 	// Only prose survives into the stored summary. Whatever the summarizer

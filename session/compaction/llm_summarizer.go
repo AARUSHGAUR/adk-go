@@ -215,7 +215,12 @@ func hasText(c *genai.Content) bool {
 		return false
 	}
 	for _, p := range c.Parts {
-		if p != nil && strings.TrimSpace(p.Text) != "" {
+		// Thought parts do not count. They are the model's reasoning, and the
+		// transcript builder deliberately skips them when rendering a stored
+		// summary, so a thought-only summary would be accepted here and then
+		// render as nothing: the covered turns would be dropped and replaced by
+		// an empty line.
+		if p != nil && !p.Thought && strings.TrimSpace(p.Text) != "" {
 			return true
 		}
 	}
@@ -245,18 +250,18 @@ func (s *LLMSummarizer) formatEvents(events []*session.Event, cap int) string {
 			switch {
 			case p.Thought && p.Text != "":
 				if !isCompaction {
-					lines = append(lines, fmt.Sprintf("%s (thought): %s", ev.Author, escapeLines(s.truncateTo(p.Text, cap))))
+					lines = append(lines, fmt.Sprintf("%s (thought): %s", escapeLines(ev.Author), escapeLines(s.truncateTo(p.Text, cap))))
 				}
 			case p.Text != "":
-				lines = append(lines, fmt.Sprintf("%s: %s", ev.Author, escapeLines(s.truncateTo(p.Text, cap))))
+				lines = append(lines, fmt.Sprintf("%s: %s", escapeLines(ev.Author), escapeLines(s.truncateTo(p.Text, cap))))
 			}
 			if p.FunctionCall != nil {
 				lines = append(lines, fmt.Sprintf("%s called tool: %s(%s)",
-					ev.Author, p.FunctionCall.Name, escapeLines(s.truncateTo(stringify(p.FunctionCall.Args), cap))))
+					escapeLines(ev.Author), escapeLines(p.FunctionCall.Name), escapeLines(s.truncateTo(stringify(p.FunctionCall.Args), cap))))
 			}
 			if p.FunctionResponse != nil {
 				lines = append(lines, fmt.Sprintf("Tool response from %s: %s",
-					p.FunctionResponse.Name, escapeLines(s.truncateTo(stringify(p.FunctionResponse.Response), cap))))
+					escapeLines(p.FunctionResponse.Name), escapeLines(s.truncateTo(stringify(p.FunctionResponse.Response), cap))))
 			}
 			// Everything else gets a placeholder rather than nothing. Dropping
 			// the bytes of an image or a code-execution result is right, but
@@ -264,7 +269,7 @@ func (s *LLMSummarizer) formatEvents(events []*session.Event, cap int) string {
 			// the transcript is all that is left, and an event made only of
 			// these parts would render as an empty line.
 			if kind := placeholderKind(p); kind != "" {
-				lines = append(lines, fmt.Sprintf("%s: [%s]", ev.Author, kind))
+				lines = append(lines, fmt.Sprintf("%s: [%s]", escapeLines(ev.Author), kind))
 			}
 		}
 	}

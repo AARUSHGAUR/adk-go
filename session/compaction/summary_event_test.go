@@ -169,3 +169,40 @@ func TestCompactionEventIsNotAFinalResponse(t *testing.T) {
 		t.Error("a compaction event reports IsFinalResponse() = true; streaming clients would show it as an empty reply")
 	}
 }
+
+// TestNewSummaryEventRejectsInteriorDisorder checks that a window whose ends
+// are ordered but whose middle is not is refused.
+//
+// The range is the interval between the first and last event, and prompt
+// assembly deletes everything inside it. An interior event stamped past the
+// last one is summarized, falls outside that interval, and so also survives in
+// the prompt, which shows the model the same turn twice.
+func TestNewSummaryEventRejectsInteriorDisorder(t *testing.T) {
+	t.Parallel()
+
+	events := []*session.Event{
+		{Timestamp: time.Unix(1, 0)},
+		{Timestamp: time.Unix(9, 0)}, // past the last one
+		{Timestamp: time.Unix(5, 0)},
+	}
+	if _, err := NewSummaryEvent(events, genai.NewContentFromText("s", "model"), nil); err == nil {
+		t.Error("NewSummaryEvent() accepted a window with an out-of-order middle")
+	}
+}
+
+// TestNewSummaryEventRejectsThoughtOnlySummary checks that a summary made only
+// of reasoning is refused.
+//
+// The transcript builder skips thought parts of a stored summary, so one would
+// render as nothing: the covered turns get deleted and replaced by an empty
+// line.
+func TestNewSummaryEventRejectsThoughtOnlySummary(t *testing.T) {
+	t.Parallel()
+
+	events := []*session.Event{{Timestamp: time.Unix(1, 0)}, {Timestamp: time.Unix(2, 0)}}
+	summary := &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "thinking about it", Thought: true}}}
+
+	if _, err := NewSummaryEvent(events, summary, nil); err == nil {
+		t.Error("NewSummaryEvent() accepted a thought-only summary")
+	}
+}
