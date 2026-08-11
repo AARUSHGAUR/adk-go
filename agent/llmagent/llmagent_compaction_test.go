@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/httprr"
 	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
@@ -64,11 +65,12 @@ import (
 //
 // Note the two regexes differ on purpose. -run matches test names, so it is
 // anchored. -httprecord matches the cassette FILE PATH, so anchoring it the same
-// way would never match "testdata/TestCompactionE2E.httprr" and this test would
-// silently skip instead of recording.
+// way would never match "testdata/TestCompactionE2E.httprr", so nothing would
+// be recorded.
 //
-// and commit the resulting testdata/TestCompactionE2E.httprr. Until then the
-// test skips.
+// Commit the resulting testdata/TestCompactionE2E.httprr. The cassette is
+// committed, so a missing one is a lost or renamed file and fails the test
+// rather than skipping it.
 //
 // This test deliberately has no //go:generate directive of its own. The
 // package-level one already carries -httprecord=Test, which matches every
@@ -76,8 +78,8 @@ import (
 // re-record all of them by accident. For the same reason, do not record with
 // "go generate ./agent/llmagent/...". Note also that a failed
 // recording still leaves a cassette behind, and it can look plausibly sized
-// because the failing exchange is recorded too. Delete it, or the next run finds
-// a file, declines to skip, and replays the recorded failure.
+// because the failing exchange is recorded too. Delete it, or the next run
+// replays the recorded failure.
 //
 // The cassette is sensitive to anything that changes prompt bytes, including the
 // summarizer prompt template, the transcript line format, tool-argument
@@ -239,6 +241,25 @@ func TestCompactionE2E(t *testing.T) {
 	// Structural checks, asserted here rather than inferred from the fact that a
 	// recorded model once accepted the bytes. Every prompt is checked, not only
 	// the final one.
+	// The summary must actually stand for the range it claims. Every event the
+	// first compaction covers has to be absent from the final prompt: the two
+	// turns asserted above are the visible part of that, but the range is the
+	// contract, so it is checked directly.
+	covered := summaries[0].Actions.Compaction
+	for _, ev := range events {
+		if compaction.IsCompactionEvent(ev) || ev.Timestamp.Before(covered.StartTimestamp) || ev.Timestamp.After(covered.EndTimestamp) {
+			continue
+		}
+		for _, part := range utils.Content(ev).Parts {
+			if part == nil || strings.TrimSpace(part.Text) == "" {
+				continue
+			}
+			if strings.Contains(final, strings.TrimSpace(part.Text)) {
+				t.Errorf("event %q is inside the compacted range but its text is still in the final prompt: %q", ev.ID, part.Text)
+			}
+		}
+	}
+
 	withSummaryAndTools := 0
 	for i, p := range prompts {
 		assertNoOrphanFunctionResponses(t, i, p)
