@@ -319,6 +319,9 @@ func (l *consoleLauncher) SimpleDescription() string {
 
 // Execute implements launcher.Launcher. It parses arguments and runs the launcher.
 func (l *consoleLauncher) Execute(ctx context.Context, config *launcher.Config, args []string) error {
+	if err := config.Validate(); err != nil {
+		return err
+	}
 	remainingArgs, err := l.Parse(args)
 	if err != nil {
 		return fmt.Errorf("cannot parse args: %w", err)

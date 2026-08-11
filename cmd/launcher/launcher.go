@@ -17,6 +17,7 @@ package launcher
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
@@ -28,6 +29,22 @@ import (
 	"google.golang.org/adk/v2/session/compaction"
 	"google.golang.org/adk/v2/telemetry"
 )
+
+// Validate reports a Config that cannot work, before anything starts serving.
+//
+// The compaction config is validated inside runner.New, and a runner is built
+// per request, so without a check here an unusable setting produces a process
+// that starts cleanly and then fails every request with an error naming nothing
+// the operator can act on.
+func (c *Config) Validate() error {
+	if c == nil {
+		return nil
+	}
+	if err := c.EventsCompactionConfig.Validate(); err != nil {
+		return fmt.Errorf("invalid EventsCompactionConfig: %w", err)
+	}
+	return nil
+}
 
 // Launcher is the main interface for running an ADK application.
 // It is responsible for parsing command-line arguments and executing the
