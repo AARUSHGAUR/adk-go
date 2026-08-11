@@ -141,9 +141,15 @@ func (c *Config) Validate() error {
 // summary is produced; [LLMSummarizer] is the default implementation.
 type Summarizer interface {
 	// SummarizeEvents summarizes events into one new event carrying the result
-	// on its Actions.Compaction field. It returns a nil event when no summary
-	// was produced, which callers treat as "skip this compaction" rather than
-	// as an error. The events passed in are never modified.
+	// on its Actions.Compaction field. Build that event with [NewSummaryEvent]
+	// rather than by hand. The events passed in are never modified.
+	//
+	// The two nil returns mean different things. A nil event with a nil error
+	// is a decline: this range was not summarized, and the caller leaves
+	// history untouched and carries on. A nil event with a non-nil error is a
+	// failure, which is reported and traced. Reporting a failure as a decline
+	// makes a summarizer that never succeeds look identical to an idle one
+	// while the prompt keeps growing on every turn.
 	SummarizeEvents(ctx context.Context, events []*session.Event) (*session.Event, error)
 }
 

@@ -23,16 +23,24 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
-// NewSummaryEvent builds the event a [Summarizer] returns: an event carrying
-// summary as an [session.EventCompaction] covering the range spanned by events.
+// NewSummaryEvent builds the event a [Summarizer] returns from the summary it
+// produced. Implementations should call it rather than assembling the event
+// themselves: it derives the range the summary covers, applies the authorship
+// a stored summary needs, and refuses input that would produce a broken
+// compaction.
+//
+// The returned event carries no ID, invocation ID or timestamp. The framework
+// assigns those when it appends the event, and deliberately gives the summary
+// a fresh invocation ID rather than one belonging to a covered turn, because
+// sliding-window selection counts invocations. That is why this takes no
+// context.Context where [session.NewEvent] does.
 //
 // events must be non-empty and in chronological order, and summary must be
-// non-nil; usage may be nil. An error is returned rather than a silently broken
-// event, because an inverted range covers nothing and would leave the compacted
-// turns in every future prompt while still consuming a summary.
-//
+// non-nil and hold text. usage may be nil. An error is returned rather than a
+// silently broken event, because a range that covers nothing leaves the
+// compacted turns in every future prompt while still consuming a summary.
 // [session.EventCompaction] is a plain struct with no constructor to validate
-// in, so the check lives here instead, at the supported way to build one.
+// in, so the checks live here, at the supported way to build one.
 func NewSummaryEvent(events []*session.Event, summary *genai.Content, usage *genai.GenerateContentResponseUsageMetadata) (*session.Event, error) {
 	if len(events) == 0 {
 		return nil, fmt.Errorf("cannot summarize an empty event list")
