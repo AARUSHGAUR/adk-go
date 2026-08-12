@@ -186,8 +186,8 @@ func slidingWindowStored(ctx context.Context, cfg *compaction.Config, sess sessi
 }
 
 // tailRetentionStored is slidingWindowStored for the tail-retention strategy.
-func tailRetentionStored(ctx context.Context, cfg *compaction.Config, sess session.Session, liveInvocationID string, estimate TokenCounter, progress ProgressGate) (*session.Event, error) {
-	ev, finish, err := TailRetention(ctx, cfg, sess, liveInvocationID, estimate, progress)
+func tailRetentionStored(ctx context.Context, cfg *compaction.Config, sess session.Session, scope TurnScope, estimate TokenCounter, progress ProgressGate) (*session.Event, error) {
+	ev, finish, err := TailRetention(ctx, cfg, sess, scope, estimate, progress)
 	finish(err, "")
 	return ev, err
 }

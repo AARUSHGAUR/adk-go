@@ -64,7 +64,11 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		if ctx.Err() != nil {
 			return
 		}
-		summary, finish, err := compactioninternal.TailRetention(ctx, rt.Config(), sess, ctx.InvocationID(), promptTokenEstimator(ctx), rt)
+		summary, finish, err := compactioninternal.TailRetention(ctx, rt.Config(), sess, compactioninternal.TurnScope{
+			InvocationID:   ctx.InvocationID(),
+			Branch:         ctx.Branch(),
+			IsolationScope: ctx.IsolationScope(),
+		}, promptTokenEstimator(ctx), rt)
 		if err != nil {
 			degrade(ctx, "token-threshold", err)
 			return

@@ -16,12 +16,14 @@ package compactioninternal
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"unicode/utf8"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/telemetry"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
@@ -33,6 +35,29 @@ import (
 // for instance before the first model response of a session. Returning zero
 // means the count could not be determined, which suppresses compaction.
 type TokenCounter func(events []*session.Event) int
+
+// TurnScope describes the turn a tail-retention pass is running inside.
+//
+// Everything a compaction needs to know about "who is asking": which
+// invocation is in flight, and which slice of history that invocation can
+// actually see. The prompt it is trying to shrink is built with the same branch
+// and isolation-scope filtering, so reasoning about its size without them
+// measures somebody else's conversation.
+type TurnScope struct {
+	// InvocationID is the turn in flight, whose opening question must not be
+	// summarized out of the prompt that answers it.
+	InvocationID string
+	// Branch and IsolationScope are the visibility the turn runs under.
+	Branch         string
+	IsolationScope string
+}
+
+// visible reports whether ev is part of the history this turn can see.
+func (s TurnScope) visible(ev *session.Event) bool {
+	return ev != nil &&
+		utils.EventBelongsToBranch(s.Branch, ev.Branch) &&
+		ev.IsolationScope == s.IsolationScope
+}
 
 // ProgressGate decides whether another compaction at a given prompt size is
 // worth attempting, and remembers the ones that happen.
@@ -57,7 +82,7 @@ type ProgressGate interface {
 // which is what lets it react to a single long turn rather than waiting for the
 // turn to end. Callers must run it before assembling contents so the fresh
 // summary is reflected in the request.
-func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Session, liveInvocationID string, estimate TokenCounter, progress ProgressGate) (*session.Event, Finish, error) {
+func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Session, scope TurnScope, estimate TokenCounter, progress ProgressGate) (*session.Event, Finish, error) {
 	noop := func(error, string) {}
 	if !HasTailRetention(cfg) {
 		return nil, noop, nil
@@ -70,7 +95,7 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 	}
 
 	events := collect(sess)
-	tokens, ok := promptTokenCount(events, estimate)
+	tokens, ok := promptTokenCount(events, scope, estimate)
 	if !ok {
 		return nil, noop, nil
 	}
@@ -92,7 +117,7 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		return nil, noop, nil
 	}
 
-	window := selectTailRetentionWindow(events, cfg.EventRetentionSize, liveInvocationID)
+	window := selectTailRetentionWindow(events, cfg.EventRetentionSize, scope)
 	if len(window) == 0 {
 		// The threshold is crossed and nothing can be summarized: the retained
 		// tail is the whole history, or the window has no self-contained prefix
@@ -103,7 +128,7 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		return nil, noop, nil
 	}
 
-	summary, finish, err := summarizeTraced(ctx, cfg, sess, liveInvocationID, telemetry.CompactionTriggerTokenThreshold, window)
+	summary, finish, err := summarizeTraced(ctx, cfg, sess, scope.InvocationID, telemetry.CompactionTriggerTokenThreshold, window)
 	if err != nil {
 		return nil, noop, fmt.Errorf("tail-retention summarization failed: %w", err)
 	}
@@ -120,6 +145,22 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 // reported a real prompt token count yet.
 const charsPerToken = 4
 
+// jsonChars approximates the rendered size of a tool payload.
+//
+// What reaches the model is a serialized structure, so its JSON length is much
+// closer than anything derived from the map alone. A payload that will not
+// marshal contributes nothing, which is the same answer as not looking.
+func jsonChars(v map[string]any) int {
+	if len(v) == 0 {
+		return 0
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return 0
+	}
+	return utf8.RuneCount(b)
+}
+
 // promptTokenCount returns the most recently observed prompt token count in
 // events, falling back to estimate when no event reports one.
 //
@@ -130,8 +171,17 @@ const charsPerToken = 4
 //
 // The second result is false when no count could be determined, which callers
 // treat as "do not compact yet".
-func promptTokenCount(events []*session.Event, estimate TokenCounter) (int, bool) {
+func promptTokenCount(events []*session.Event, scope TurnScope, estimate TokenCounter) (int, bool) {
 	for i := len(events) - 1; i >= 0; i-- {
+		// Only what this turn can see. The count is read to decide whether this
+		// turn's prompt is too large, and that prompt is assembled with the
+		// same branch and isolation-scope filtering, so a reading from a
+		// sibling branch describes a different conversation. A sub-agent whose
+		// own prompt is a couple of tokens read its parent's 200,000 and
+		// compacted history it had no business compacting.
+		if !scope.visible(events[i]) {
+			continue
+		}
 		// Skip compaction events. A summary carries the usage metadata of the
 		// summarizer's own call, which measures the transcript it was handed
 		// rather than the agent's prompt. Reading it latches compaction on: the
@@ -178,21 +228,32 @@ func promptTokenCount(events []*session.Event, estimate TokenCounter) (int, bool
 // estimate, and is consulted only until the first model response reports a real
 // prompt token count.
 func EstimateTokensFromContents(contents []*genai.Content) int {
-	textChars := 0
+	chars := 0
 	for _, content := range contents {
 		if content == nil {
 			continue
 		}
 		for _, part := range content.Parts {
-			if part != nil {
-				textChars += utf8.RuneCountInString(part.Text)
+			if part == nil {
+				continue
+			}
+			chars += utf8.RuneCountInString(part.Text)
+			// Tool traffic, which text alone cannot see. A tool loop is the
+			// thing this estimate exists to catch and the one thing it grows
+			// by, so counting only Text reported no growth at all across
+			// 400,000 characters of function responses.
+			if fc := part.FunctionCall; fc != nil {
+				chars += utf8.RuneCountInString(fc.Name) + jsonChars(fc.Args)
+			}
+			if fr := part.FunctionResponse; fr != nil {
+				chars += utf8.RuneCountInString(fr.Name) + jsonChars(fr.Response)
 			}
 		}
 	}
-	if textChars <= 0 {
+	if chars <= 0 {
 		return 0
 	}
-	return textChars / charsPerToken
+	return chars / charsPerToken
 }
 
 // selectTailRetentionWindow returns the events a tail-retention compaction
@@ -205,7 +266,7 @@ func EstimateTokensFromContents(contents []*genai.Content) int {
 // When an earlier compaction exists its summary is prepended to the window, so
 // the new summary covers and supersedes it. That keeps history as one rolling
 // summary plus a raw tail, rather than an ever-growing chain of summaries.
-func selectTailRetentionWindow(events []*session.Event, retentionSize int, liveInvocationID string) []*session.Event {
+func selectTailRetentionWindow(events []*session.Event, retentionSize int, scope TurnScope) []*session.Event {
 	if retentionSize < 0 {
 		return nil
 	}
@@ -244,9 +305,9 @@ func selectTailRetentionWindow(events []*session.Event, retentionSize int, liveI
 	// question stays eligible, and a covered set can describe a window with a
 	// hole in it where an interval could not.
 	liveHead := ""
-	if liveInvocationID != "" {
+	if scope.InvocationID != "" {
 		for _, ev := range events {
-			if ev != nil && ev.InvocationID == liveInvocationID && !hasCompaction(ev) {
+			if ev != nil && ev.InvocationID == scope.InvocationID && !hasCompaction(ev) {
 				liveHead = ev.ID
 				break
 			}
@@ -287,7 +348,18 @@ func selectTailRetentionWindow(events []*session.Event, retentionSize int, liveI
 	// session routinely spans branches, and summarizing across one folds a
 	// sub-agent's content into a summary the parent can read, defeating the
 	// filters that keep those apart.
-	window := longestSelfContainedPrefix(trimToOneScope(candidates[:firstRetained]))
+	scoped := trimToOneScope(candidates[:firstRetained])
+	window := longestSelfContainedPrefix(scoped)
+	if len(window) == 0 {
+		// The head holds a call nothing answered, which the sliding window
+		// already knows how to step past. Without the same fallback here, a
+		// tool awaiting approval or one whose backend died anchored the head of
+		// every later window and tail retention stopped for the rest of the
+		// session, silently, since "no prefix" and "nothing to do" both come
+		// back as nil. Measured with 38 compactable events stuck behind one
+		// pending call, on the strategy whose whole job is bounding growth.
+		window = skipBlockedHead(scoped)
+	}
 	if len(window) == 0 {
 		return nil
 	}

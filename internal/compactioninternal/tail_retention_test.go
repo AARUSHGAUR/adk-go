@@ -139,7 +139,7 @@ func TestSelectTailRetentionWindow(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := ids(selectTailRetentionWindow(tc.events, tc.retention, ""))
+			got := ids(selectTailRetentionWindow(tc.events, tc.retention, TurnScope{}))
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("selectTailRetentionWindow(retention=%d) mismatch (-want +got):\n%s", tc.retention, diff)
 			}
@@ -160,7 +160,7 @@ func TestSelectTailRetentionWindowSeedsPreviousSummary(t *testing.T) {
 		textEvent("e", "inv3", 6, "q3"), modelTextEvent("f", "inv3", 7, "a3"),
 	}
 
-	window := selectTailRetentionWindow(events, 2, "")
+	window := selectTailRetentionWindow(events, 2, TurnScope{})
 	if len(window) == 0 {
 		t.Fatal("selectTailRetentionWindow() returned nothing")
 	}
@@ -247,9 +247,9 @@ func TestPromptTokenCount(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := promptTokenCount(tc.events, tc.estimate)
+			got, ok := promptTokenCount(tc.events, TurnScope{}, tc.estimate)
 			if got != tc.want || ok != tc.wantOK {
-				t.Errorf("promptTokenCount() = (%d, %t), want (%d, %t)", got, ok, tc.want, tc.wantOK)
+				t.Errorf("promptTokenCount() = (%d, TurnScope{}, %t), want (%d, %t)", got, ok, tc.want, tc.wantOK)
 			}
 		})
 	}
@@ -275,11 +275,25 @@ func TestEstimateTokensFromContents(t *testing.T) {
 		{name: "nil content is skipped", contents: []*genai.Content{nil, text(4)}, want: 1},
 		{name: "nil part is skipped", contents: []*genai.Content{{Parts: []*genai.Part{nil, {Text: "xxxx"}}}}, want: 1},
 		{
-			// Non-text parts are invisible to the estimate, which is why it is
-			// only a floor until real usage metadata arrives.
-			name:     "function call contributes nothing",
+			// Tool traffic counts. It is what a long turn grows by, and the
+			// estimate exists to notice a long turn growing: "search" is six
+			// characters, so it is a token and a half's worth on its own.
+			name:     "a function call counts its name",
 			contents: []*genai.Content{{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "search"}}}}},
-			want:     0,
+			want:     1,
+		},
+		{
+			// The payload dominates, and counting only Text saw none of it.
+			name: "a function response counts its payload",
+			contents: []*genai.Content{{Parts: []*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{
+					Name:     "search",
+					Response: map[string]any{"result": strings.Repeat("y", 4000)},
+				},
+			}}}},
+			// 4000 characters of payload, so a thousand tokens give or take the
+			// JSON punctuation and the name.
+			want: 1004,
 		},
 	}
 	for _, tc := range tests {
@@ -383,7 +397,7 @@ func TestTailRetention(t *testing.T) {
 				cfg = &copied
 			}
 
-			got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: tc.events}, "", nil, nil)
+			got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: tc.events}, TurnScope{}, nil, nil)
 			if gotErr := err != nil; gotErr != tc.wantErr {
 				t.Fatalf("tailRetentionStored() error = %v, wantErr %t", err, tc.wantErr)
 			}
@@ -412,7 +426,7 @@ func TestTailRetentionUsesTheEstimator(t *testing.T) {
 	summarizer := &fakeSummarizer{summary: "sum"}
 	cfg := &compaction.Config{TokenThreshold: 500, EventRetentionSize: 2, Summarizer: summarizer}
 
-	got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "",
+	got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, TurnScope{},
 		func([]*session.Event) int { return 100 }, nil)
 	if err != nil {
 		t.Fatalf("tailRetentionStored() error = %v", err)
@@ -421,7 +435,7 @@ func TestTailRetentionUsesTheEstimator(t *testing.T) {
 		t.Error("tailRetentionStored() compacted despite an estimate below the threshold")
 	}
 
-	got, err = tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "",
+	got, err = tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, TurnScope{},
 		func([]*session.Event) int { return 700 }, nil)
 	if err != nil {
 		t.Fatalf("tailRetentionStored() error = %v", err)
@@ -435,7 +449,7 @@ func TestTailRetentionRequiresSummarizer(t *testing.T) {
 	t.Parallel()
 
 	_, err := tailRetentionStored(context.Background(), &compaction.Config{TokenThreshold: 1, EventRetentionSize: 0},
-		&staticSession{events: []*session.Event{withUsage(modelTextEvent("a", "inv1", 1, "a"), 10)}}, "", nil, nil)
+		&staticSession{events: []*session.Event{withUsage(modelTextEvent("a", "inv1", 1, "a"), 10)}}, TurnScope{}, nil, nil)
 	if err == nil {
 		t.Fatal("tailRetentionStored() with no Summarizer returned nil error, want an error")
 	}
@@ -450,7 +464,7 @@ func TestTailRetentionStampsTheSummary(t *testing.T) {
 	}
 	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 0, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "", nil, nil)
+	got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, TurnScope{}, nil, nil)
 	if err != nil {
 		t.Fatalf("tailRetentionStored() error = %v", err)
 	}
@@ -485,7 +499,7 @@ func TestTailRetentionThenApplyShrinksHistory(t *testing.T) {
 	}
 	cfg := &compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2, Summarizer: &fakeSummarizer{summary: "SUMMARY"}}
 
-	summary, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "", nil, nil)
+	summary, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, TurnScope{}, nil, nil)
 	if err != nil {
 		t.Fatalf("tailRetentionStored() error = %v", err)
 	}
@@ -523,7 +537,7 @@ func TestSelectTailRetentionWindowStaysInOneScope(t *testing.T) {
 
 	events := []*session.Event{root1, root2, sub, tail1, tail2}
 
-	window := selectTailRetentionWindow(events, 2, "")
+	window := selectTailRetentionWindow(events, 2, TurnScope{})
 	if diff := cmp.Diff([]string{"a", "b"}, ids(window)); diff != "" {
 		t.Errorf("selectTailRetentionWindow() mismatch (-want +got):\n%s\nthe window must stop at the scope change", diff)
 	}
@@ -558,7 +572,7 @@ func TestSelectTailRetentionWindowKeepsATiedBoundaryEvent(t *testing.T) {
 		textEvent("e", "inv4", 6, "q4"),
 	}
 
-	window := selectTailRetentionWindow(events, 1, "")
+	window := selectTailRetentionWindow(events, 1, TurnScope{})
 	if !slices.Contains(ids(window), "tied") {
 		t.Errorf("window %v does not include the boundary event, so it is covered by the next range without being summarized", ids(window))
 	}
@@ -591,12 +605,12 @@ func TestPromptTokenCountAddsEventsSinceTheLastReport(t *testing.T) {
 		return n / 4
 	}
 
-	got, ok := promptTokenCount(events, estimate)
+	got, ok := promptTokenCount(events, TurnScope{}, estimate)
 	if !ok {
 		t.Fatal("promptTokenCount() reported nothing")
 	}
 	if got <= 100 {
-		t.Errorf("promptTokenCount() = %d, want more than the reported 100: the 400 characters appended since are not counted", got)
+		t.Errorf("promptTokenCount() = %d, TurnScope{}, want more than the reported 100: the 400 characters appended since are not counted", got)
 	}
 }
 
@@ -626,7 +640,7 @@ func TestTailRetentionReArmsTheGateBelowTheThreshold(t *testing.T) {
 	gate := &recordingGate{allow: true}
 	cfg := &compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "", nil, gate)
+	got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, TurnScope{}, nil, gate)
 	if err != nil {
 		t.Fatalf("tailRetentionStored() error = %v", err)
 	}
@@ -654,7 +668,7 @@ func TestTailRetentionDoesNotRecordAFailedAttempt(t *testing.T) {
 	gate := &recordingGate{allow: true}
 	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 2, Summarizer: &fakeSummarizer{err: errors.New("boom")}}
 
-	if _, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "", nil, gate); err == nil {
+	if _, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, TurnScope{}, nil, gate); err == nil {
 		t.Fatal("tailRetentionStored() error = nil, want the summarizer failure")
 	}
 	if len(gate.recorded) != 0 {
@@ -674,7 +688,7 @@ func TestTailRetentionRecordsASuccessfulCompaction(t *testing.T) {
 	gate := &recordingGate{allow: true}
 	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 2, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "", nil, gate)
+	got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, TurnScope{}, nil, gate)
 	if err != nil || got == nil {
 		t.Fatalf("tailRetentionStored() = %v, %v, want a summary and no error", got, err)
 	}
@@ -707,7 +721,7 @@ func TestSelectTailRetentionWindowKeepsTheLiveQuestion(t *testing.T) {
 		modelTextEvent("t3", "inv2", 6, "tool step 3"),
 	}
 
-	got := ids(selectTailRetentionWindow(events, 2, "inv2"))
+	got := ids(selectTailRetentionWindow(events, 2, TurnScope{InvocationID: "inv2"}))
 
 	if slices.Contains(got, "q2") {
 		t.Error("the window covers the question the turn is answering")
@@ -716,5 +730,118 @@ func TestSelectTailRetentionWindowKeepsTheLiveQuestion(t *testing.T) {
 	// question, which only a covered set can express.
 	if diff := cmp.Diff([]string{"q1", "a1", "t1"}, got); diff != "" {
 		t.Errorf("window mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestSelectTailRetentionWindowStepsPastABlockedHead pins that one unanswered
+// tool call does not stop tail retention for the rest of the session.
+//
+// The window is anchored to the last compaction boundary, so a call awaiting
+// human approval, or one whose backend died, sits at the head of every later
+// attempt. The sliding window already steps past it; tail retention gave up
+// instead, and gave up silently, since "no self-contained prefix" and "nothing
+// to do" both come back as nil. Long tool-using sessions are exactly the ones
+// this strategy exists for.
+func TestSelectTailRetentionWindowStepsPastABlockedHead(t *testing.T) {
+	t.Parallel()
+
+	events := []*session.Event{
+		// A call at the head that nothing ever answers.
+		callEvent("blocked", "inv1", 1, "c-pending"),
+		// A complete exchange behind it, which is compactable.
+		callEvent("call", "inv2", 2, "c-done"),
+		responseEvent("resp", "inv2", 3, "c-done"),
+		textEvent("q", "inv3", 4, "another question"),
+		modelTextEvent("a", "inv3", 5, "another answer"),
+	}
+
+	got := ids(selectTailRetentionWindow(events, 2, TurnScope{}))
+	if len(got) == 0 {
+		t.Fatal("selectTailRetentionWindow() gave up because the head is blocked")
+	}
+	if slices.Contains(got, "blocked") {
+		t.Error("the window covers the pending call, which must stay raw and visible")
+	}
+	if diff := cmp.Diff([]string{"call", "resp"}, got); diff != "" {
+		t.Errorf("window mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestSkipBlockedHeadKeepsACallWithItsResponse pins that stepping past a
+// blocked head never summarizes a response whose call stays raw.
+//
+// longestSelfContainedPrefix only tracks obligations opened inside the slice it
+// is handed, so a response whose call sits in the skipped head looked
+// unremarkable: the response was summarized, the call stayed raw, and the model
+// was shown a call it had already answered with the answer gone.
+func TestSkipBlockedHeadKeepsACallWithItsResponse(t *testing.T) {
+	t.Parallel()
+
+	window := []*session.Event{
+		// One event opening two calls: the head is blocked on c-pending, and
+		// c-two is answered below. Any resume point is therefore past both
+		// calls, so the response is the first thing the tail sees.
+		multiCallEvent("head", "inv1", 1, "c-pending", "c-two"),
+		responseEvent("resp2", "inv1", 2, "c-two"),
+		textEvent("q", "inv2", 3, "later question"),
+		modelTextEvent("a", "inv2", 4, "later answer"),
+	}
+
+	got := ids(skipBlockedHead(window))
+	if slices.Contains(got, "resp2") {
+		t.Errorf("window %v summarizes a response whose call stays raw in the skipped head", got)
+	}
+}
+
+// TestPromptTokenCountIgnoresOtherBranches pins that a turn reads a token count
+// describing its own prompt.
+//
+// The count decides whether this turn's prompt is too large, and that prompt is
+// assembled with branch and isolation-scope filtering. Reading the newest count
+// from anywhere in the session meant a sub-agent whose own prompt is a few
+// tokens inherited its parent's, and compacted history it had no business
+// compacting.
+func TestPromptTokenCountIgnoresOtherBranches(t *testing.T) {
+	t.Parallel()
+
+	onBranch := func(ev *session.Event, branch string) *session.Event {
+		ev.Branch = branch
+		return ev
+	}
+	events := []*session.Event{
+		withUsage(onBranch(modelTextEvent("mine", "inv1", 1, "small"), "parent.child"), 40),
+		// A sibling's turn, invisible to parent.child, reporting a huge prompt.
+		withUsage(onBranch(modelTextEvent("sibling", "inv2", 2, "huge"), "parent.other"), 200000),
+	}
+
+	got, ok := promptTokenCount(events, TurnScope{Branch: "parent.child"}, nil)
+	if !ok {
+		t.Fatal("promptTokenCount() found no count at all")
+	}
+	if got != 40 {
+		t.Errorf("promptTokenCount() = %d, want 40: the reading came from another branch", got)
+	}
+}
+
+// TestPromptTokenCountIgnoresOtherIsolationScopes is the same property for
+// isolation scope, which is an exact match rather than an ancestor one.
+func TestPromptTokenCountIgnoresOtherIsolationScopes(t *testing.T) {
+	t.Parallel()
+
+	scoped := func(ev *session.Event, scope string) *session.Event {
+		ev.IsolationScope = scope
+		return ev
+	}
+	events := []*session.Event{
+		withUsage(scoped(modelTextEvent("mine", "inv1", 1, "small"), "task-a"), 40),
+		withUsage(scoped(modelTextEvent("other", "inv2", 2, "huge"), "task-b"), 200000),
+	}
+
+	got, ok := promptTokenCount(events, TurnScope{IsolationScope: "task-a"}, nil)
+	if !ok {
+		t.Fatal("promptTokenCount() found no count at all")
+	}
+	if got != 40 {
+		t.Errorf("promptTokenCount() = %d, want 40: the reading came from another isolation scope", got)
 	}
 }

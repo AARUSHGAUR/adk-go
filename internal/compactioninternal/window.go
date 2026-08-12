@@ -330,6 +330,16 @@ func trimToOneScope(window []*session.Event) []*session.Event {
 // stay raw and visible, which is what a pending call needs anyway. The summary
 // is a contiguous later range, so the coverage invariant still holds.
 //
+// A run that answers a call left behind in the skipped head is refused.
+// longestSelfContainedPrefix only tracks obligations opened inside the slice it
+// is given, so a response whose call sits earlier looks unremarkable to it: the
+// response would be summarized while its call stayed raw, and the model would
+// be shown a call it had already answered with the answer gone. Refusing every
+// unmatched response instead would be too strong, and would stall the ordinary
+// long-running-tool resume, where the call is behind the compaction boundary
+// and legitimately already summarized. The distinction is whether the call is
+// in the head this function chose to skip.
+//
 // nil still comes back when nothing after the blockage is self-contained
 // either.
 func skipBlockedHead(window []*session.Event) []*session.Event {
@@ -340,11 +350,48 @@ func skipBlockedHead(window []*session.Event) []*session.Event {
 		if len(utils.FunctionCalls(utils.Content(prev))) == 0 && len(prev.Actions.RequestedToolConfirmations) == 0 {
 			continue
 		}
-		if tail := longestSelfContainedPrefix(window[start:]); len(tail) > 0 {
-			return tail
+		tail := longestSelfContainedPrefix(window[start:])
+		if len(tail) == 0 {
+			continue
 		}
+		if answersAnyOf(tail, openCallIDs(window[:start])) {
+			continue
+		}
+		return tail
 	}
 	return nil
+}
+
+// openCallIDs returns the call IDs opened by events and not answered by them.
+func openCallIDs(events []*session.Event) map[string]struct{} {
+	open := make(map[string]struct{})
+	for i, ev := range events {
+		for _, resp := range utils.FunctionResponses(utils.Content(ev)) {
+			delete(open, resp.ID)
+		}
+		for _, call := range utils.FunctionCalls(utils.Content(ev)) {
+			open[callObligationKey(call, i)] = struct{}{}
+		}
+		for id := range ev.Actions.RequestedToolConfirmations {
+			open[id] = struct{}{}
+		}
+	}
+	return open
+}
+
+// answersAnyOf reports whether events answer any of the given call IDs.
+func answersAnyOf(events []*session.Event, ids map[string]struct{}) bool {
+	if len(ids) == 0 {
+		return false
+	}
+	for _, ev := range events {
+		for _, resp := range utils.FunctionResponses(utils.Content(ev)) {
+			if _, ok := ids[resp.ID]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // coversAllOf reports whether a stands in for every event b does.

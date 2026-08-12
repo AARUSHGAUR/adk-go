@@ -21,7 +21,6 @@ import (
 	"reflect"
 	"slices"
 	"sort"
-	"strings"
 
 	"google.golang.org/genai"
 
@@ -231,16 +230,7 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 }
 
 func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
-	if invocationBranch == "" || event.Branch == "" {
-		return true
-	}
-	if event.Branch == invocationBranch {
-		return true
-	}
-	// We use dot to delimit branch nodes. To avoid simple prefix match
-	// (e.g. agent_0 unexpectedly matching agent_00), require either perfect branch
-	// match, or match prefix with an additional explicit '.'
-	return strings.HasPrefix(invocationBranch, event.Branch+".")
+	return utils.EventBelongsToBranch(invocationBranch, event.Branch)
 }
 
 // rearrangeEventsForLatestFunctionResponse
