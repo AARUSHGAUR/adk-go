@@ -16,6 +16,7 @@ package triggers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -129,6 +130,14 @@ func (r *RetriableRunner) runAgentWithRetry(ctx context.Context, runR *runner.Ru
 		isThrottled := false
 		for event, err := range resp {
 			if err != nil {
+				// A compaction failure is bookkeeping, not the delivery. The
+				// agent has already answered and its events are persisted, so
+				// failing here would NACK a message that was handled, and on
+				// Pub/Sub push that means redelivering work already done.
+				if errors.Is(err, compaction.ErrCompaction) {
+					log.Printf("triggers: %v", err)
+					continue
+				}
 				runErr = err
 				if isResourceExhausted(err) {
 					isThrottled = true

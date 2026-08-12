@@ -17,6 +17,7 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -128,6 +129,14 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 	var events []*session.Event
 	for event, err := range resp {
 		if err != nil {
+			// A compaction failure is bookkeeping, not the turn. The events are
+			// already persisted and the agent has already answered, so failing
+			// the request would discard work the caller asked for and paid for
+			// in order to report that a later prompt will be larger.
+			if errors.Is(err, compaction.ErrCompaction) {
+				log.Printf("adkrest: %v", err)
+				continue
+			}
 			return nil, newStatusError(fmt.Errorf("failed to run agent: %w", err), http.StatusInternalServerError)
 		}
 		events = append(events, event)
@@ -182,6 +191,13 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	for event, err := range resp {
 		if err != nil {
+			// Bookkeeping, not the turn: see the RunHandler comment. Streaming
+			// an error event here would tell a client its answer failed after
+			// it has already received it.
+			if errors.Is(err, compaction.ErrCompaction) {
+				log.Printf("adkrest: %v", err)
+				continue
+			}
 			err := flashErrorEvent(rc, rw, err)
 			// The error is returned only when we cannot communicate with the client
 			// Exit the handler as connection is closed.
