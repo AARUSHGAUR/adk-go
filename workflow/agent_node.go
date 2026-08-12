@@ -64,8 +64,11 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 // emits invoke_agent, so the scheduler must not add a redundant invoke_node
 // wrapper. LlmAgent nodes additionally default to single_turn mode and to
 // re-entry on resume (so a paused agent finishes instead of handing off),
-// matching runner.newAgentNode / adk-python build_node; other kinds keep the
-// engine default and an explicit RerunOnResume always wins.
+// matching runner.newAgentNode and the mode/rerun_on_resume defaults of
+// adk-python's build_node; other kinds keep the engine default and an explicit
+// RerunOnResume always wins.
+//
+// The mode default is a write to the wrapped agent's own state, not to cfg.
 func applyAgentNodeDefaults(a agent.Agent, cfg NodeConfig) NodeConfig {
 	cfg.EmitsOwnSpan = true
 
@@ -84,19 +87,28 @@ func applyAgentNodeDefaults(a agent.Agent, cfg NodeConfig) NodeConfig {
 }
 
 // NewAgentNodeWithSchemas is a convenience wrapper for NewAgentNodeWithSchemasTyped[any, any].
-// It uses explicitly provided schemas for both input and output.
+// It uses explicitly provided schemas for both input and output, and applies
+// the same LlmAgent defaults as [NewAgentNode].
 func NewAgentNodeWithSchemas(a agent.Agent, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*AgentNode, error) {
 	return newAgentNodeWithSchemasTyped[any, any](a, inputSchema, outputSchema, cfg)
 }
 
 // NewAgentNodeTyped creates a new node wrapping an agent using generics to
 // automatically infer input and output schemas from the provided types.
+// It applies the same LlmAgent defaults as [NewAgentNode].
 func NewAgentNodeTyped[Input, Output any](a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 	return newAgentNodeWithSchemasTyped[Input, Output](a, nil, nil, cfg)
 }
 
 // NewAgentNode creates a new node wrapping an agent. Input and output schemas
 // are inferred as `any`.
+//
+// When a is an LlmAgent, its mode defaults to single_turn and
+// cfg.RerunOnResume defaults to &true, so a node paused on a long-running tool
+// request re-enters and finishes instead of handing the raw reply to its
+// successor. An explicit RerunOnResume is respected, and other agent kinds
+// keep the engine default (handoff). The mode default is applied to the agent
+// itself, so wrapping one agent in several nodes settles its mode once.
 func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 	return NewAgentNodeTyped[any, any](a, cfg)
 }

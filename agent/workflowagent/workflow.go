@@ -78,18 +78,17 @@ func New(cfg Config) (agent.Agent, error) {
 // workflowAgent is the wrapper that dispatches between
 // Workflow.Run (fresh turn) and Workflow.Resume (resume turn).
 // The dispatch decision is made by inspecting ctx.UserContent for
-// a FunctionResponse targeting a previously-emitted RequestInput.
-// The workflow's RunState lives in session.State, not on this
-// struct, so a single *workflowAgent safely services many
-// concurrent sessions.
+// a FunctionResponse that answers an interrupt this run can still
+// act on — see detectResume. The workflow's RunState lives in
+// session.State, not on this struct, so a single *workflowAgent
+// safely services many concurrent sessions.
 type workflowAgent struct {
 	workflow *workflow.Workflow
 }
 
 // run is the agent.Config.Run callback. It dispatches between
-// Workflow.Resume (when the inbound user content carries a
-// FunctionResponse to a previously-emitted RequestInput) and
-// Workflow.Run (every other turn).
+// Workflow.Resume (when the inbound user content answers one of
+// this run's open interrupts) and Workflow.Run (every other turn).
 func (a *workflowAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		responses, state, ok, err := a.detectResume(ctx)

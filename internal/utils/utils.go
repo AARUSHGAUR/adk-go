@@ -112,8 +112,13 @@ func FunctionResponses(c *genai.Content) (ret []*genai.FunctionResponse) {
 // Mirrors adk-python _unwrap_response, extended with the adk-go keys for
 // cross-runtime sessions.
 //
-// Every resume path decodes through here, so a reply read back from history
-// yields the same value as the same reply taken from the inbound turn.
+// The workflow engine's three resume paths — the inbound turn in runner and in
+// workflowagent, and the replay from session history — all decode through here,
+// so a reply read back from history yields the same value as the same reply
+// taken from the inbound turn. Tool confirmation is decoded separately, by
+// llminternal's confirmation request processor, which produces the Confirmed
+// flag the tool layer enforces; that decision must not be routed through here,
+// since this function has no notion of it.
 func UnwrapResponse(data map[string]any) any {
 	if data == nil {
 		return nil // untyped nil, not a nil map: callers compare against nil
