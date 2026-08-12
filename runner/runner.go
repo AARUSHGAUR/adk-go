@@ -243,6 +243,14 @@ type Runner struct {
 //
 // The summary itself is deliberately not yielded to the caller. It is
 // bookkeeping for the next prompt, not part of the conversation.
+// invocationIDOf returns the invocation an InvocationContext names, or "".
+func invocationIDOf(ictx agent.InvocationContext) string {
+	if ictx == nil {
+		return ""
+	}
+	return ictx.InvocationID()
+}
+
 func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession session.Session, ictx agent.InvocationContext) error {
 	if !compactioninternal.HasSlidingWindow(r.compactionConfig) {
 		return nil
@@ -274,7 +282,7 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 		return fmt.Errorf("%w: post-invocation: %w", compaction.ErrCompaction, err)
 	}
 
-	summary, err := compactioninternal.SlidingWindow(ctx, r.compactionConfig, current)
+	summary, finish, err := compactioninternal.SlidingWindow(ctx, r.compactionConfig, current, invocationIDOf(ictx))
 	if err != nil {
 		return fmt.Errorf("%w: post-invocation: %w", compaction.ErrCompaction, err)
 	}
@@ -288,13 +296,16 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	// wasted call, where recording it would silently drop those turns from
 	// every later prompt.
 	if ctx.Err() != nil {
+		finish(nil, "the run ended before the summary could be stored")
 		return nil
 	}
 	latest, err := r.reloadSession(ctx, storedSession)
 	if err != nil {
+		finish(err, "")
 		return fmt.Errorf("%w: post-invocation: %w", compaction.ErrCompaction, err)
 	}
 	if compactioninternal.RangeRaced(latest, current, summary) {
+		finish(nil, "another compaction covering the same events landed while summarizing")
 		log.Printf("adk: discarding a context compaction summary because the session changed inside its range while summarizing")
 		return nil
 	}
@@ -311,6 +322,7 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	if ictx != nil && r.pluginManager != nil {
 		modified, err := r.pluginManager.RunOnEventCallback(ictx, summary)
 		if err != nil {
+			finish(err, "")
 			return fmt.Errorf("%w: plugin rejected the summary event: %w", compaction.ErrCompaction, err)
 		}
 		if modified != nil {
@@ -319,8 +331,10 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	}
 
 	if err := r.sessionService.AppendEvent(ctx, current, summary); err != nil {
+		finish(err, "")
 		return fmt.Errorf("%w: failed to append the summary event: %w", compaction.ErrCompaction, err)
 	}
+	finish(nil, "")
 	return nil
 }
 

@@ -65,12 +65,12 @@ func TestSlidingWindowEmitsSpan(t *testing.T) {
 	}
 	cfg := &compaction.Config{CompactionInterval: 2, OverlapSize: 1, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	got, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events})
+	got, err := slidingWindowStored(context.Background(), cfg, &staticSession{events: events})
 	if err != nil {
-		t.Fatalf("SlidingWindow() error = %v", err)
+		t.Fatalf("slidingWindowStored() error = %v", err)
 	}
 	if got == nil {
-		t.Fatal("SlidingWindow() produced no summary")
+		t.Fatal("slidingWindowStored() produced no summary")
 	}
 
 	spans := exp.GetSpans()
@@ -140,8 +140,8 @@ func TestCompactionSpanRecordsFailure(t *testing.T) {
 	}
 	cfg := &compaction.Config{CompactionInterval: 2, Summarizer: &fakeSummarizer{err: errors.New("boom")}}
 
-	if _, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events}); err == nil {
-		t.Fatal("SlidingWindow() succeeded, want an error")
+	if _, err := slidingWindowStored(context.Background(), cfg, &staticSession{events: events}); err == nil {
+		t.Fatal("slidingWindowStored() succeeded, want an error")
 	}
 
 	spans := exp.GetSpans()
@@ -176,9 +176,9 @@ func TestNoSpanWhenNothingToCompact(t *testing.T) {
 	events := []*session.Event{textEvent("a", "inv1", 1, "q1")}
 	cfg := &compaction.Config{CompactionInterval: 5, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	got, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events})
+	got, err := slidingWindowStored(context.Background(), cfg, &staticSession{events: events})
 	if err != nil || got != nil {
-		t.Fatalf("SlidingWindow() = (%v, %v), want (nil, nil)", got, err)
+		t.Fatalf("slidingWindowStored() = (%v, %v), want (nil, nil)", got, err)
 	}
 	if n := len(exp.GetSpans()); n != 0 {
 		t.Errorf("got %d spans when the interval was not reached, want 0", n)
@@ -197,8 +197,8 @@ func TestSpanRecordsDecliningSummarizer(t *testing.T) {
 	}
 	cfg := &compaction.Config{CompactionInterval: 2, Summarizer: &fakeSummarizer{}}
 
-	if _, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events}); err != nil {
-		t.Fatalf("SlidingWindow() error = %v", err)
+	if _, err := slidingWindowStored(context.Background(), cfg, &staticSession{events: events}); err != nil {
+		t.Fatalf("slidingWindowStored() error = %v", err)
 	}
 
 	spans := exp.GetSpans()
@@ -238,8 +238,8 @@ func TestCompactionSpanOmitsResultWhenSummarizerAlsoErrors(t *testing.T) {
 	}
 	cfg := &compaction.Config{CompactionInterval: 2, Summarizer: &bothSummarizer{}}
 
-	if _, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events}); err == nil {
-		t.Fatal("SlidingWindow() succeeded, want an error")
+	if _, err := slidingWindowStored(context.Background(), cfg, &staticSession{events: events}); err == nil {
+		t.Fatal("slidingWindowStored() succeeded, want an error")
 	}
 
 	spans := exp.GetSpans()
@@ -289,7 +289,7 @@ func TestCompactionSpanMarksAPanic(t *testing.T) {
 				t.Error("the panic did not propagate; compaction must not swallow it")
 			}
 		}()
-		_, _ = SlidingWindow(context.Background(), cfg, &staticSession{events: events})
+		_, _ = slidingWindowStored(context.Background(), cfg, &staticSession{events: events})
 	}()
 
 	spans := exp.GetSpans()
@@ -311,9 +311,16 @@ func (s *geminiSummarizer) GetGoogleLLMVariant() genai.Backend { return s.backen
 
 // TestCompactionSpanRecordsGenAISystem pins gen_ai.system on the span.
 //
-// It names the system that produced the summary, and the reference
-// implementation sets it on every compaction span. A summarizer that does not
-// report a backend leaves it unset rather than guessing.
+// It names the system that produced the summary. Two deliberate divergences
+// from the reference implementation, both repo-wide rather than compaction's,
+// and both asserted here so a repo-wide change has to update this test rather
+// than discover it in a dashboard.
+//
+// The values carry this repo's semconv prefix, "gcp.vertex_ai" against the
+// reference's bare "vertex_ai". And a backend this repo cannot name leaves the
+// attribute off, where the reference always emits one: naming a provider we
+// have not identified is worse than saying nothing. Whatever the mapping is, it
+// is shared with the rest of telemetry rather than restated here.
 func TestCompactionSpanRecordsGenAISystem(t *testing.T) {
 	events := []*session.Event{
 		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
@@ -339,12 +346,18 @@ func TestCompactionSpanRecordsGenAISystem(t *testing.T) {
 					backend:        tc.backend,
 				},
 			}
-			if _, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events}); err != nil {
-				t.Fatalf("SlidingWindow() error = %v", err)
+			if _, err := slidingWindowStored(context.Background(), cfg, &staticSession{events: events}); err != nil {
+				t.Fatalf("slidingWindowStored() error = %v", err)
 			}
 			spans := exp.GetSpans()
 			if len(spans) != 1 {
 				t.Fatalf("got %d spans, want 1", len(spans))
+			}
+			// The expectation comes from the shared mapping, so this test
+			// tracks it rather than freezing a second copy of it.
+			if want, ok := telemetry.GenAISystemAttr(tc.backend); ok != (tc.want != "") ||
+				(ok && want.Value.AsString() != tc.want) {
+				t.Fatalf("the shared mapping now returns (%v, %t) for %v, so this table is stale", want.Value.AsString(), ok, tc.backend)
 			}
 			got, ok := attrs(spans[0].Attributes)["gen_ai.system"]
 			if tc.want == "" {
@@ -386,8 +399,8 @@ func TestCompactionSpanCarriesInvocationAndUsage(t *testing.T) {
 		},
 	}
 
-	if _, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events}); err != nil {
-		t.Fatalf("SlidingWindow() error = %v", err)
+	if _, err := slidingWindowStored(context.Background(), cfg, &staticSession{events: events}); err != nil {
+		t.Fatalf("slidingWindowStored() error = %v", err)
 	}
 	a := attrs(exp.GetSpans()[0].Attributes)
 
@@ -435,8 +448,8 @@ func TestCompactionSpanAttributeKeySet(t *testing.T) {
 	}
 	cfg := &compaction.Config{CompactionInterval: 2, OverlapSize: 1, Summarizer: &fakeSummarizer{summary: "SUM"}}
 
-	if _, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events}); err != nil {
-		t.Fatalf("SlidingWindow() error = %v", err)
+	if _, err := slidingWindowStored(context.Background(), cfg, &staticSession{events: events}); err != nil {
+		t.Fatalf("slidingWindowStored() error = %v", err)
 	}
 
 	want := []string{
@@ -471,8 +484,8 @@ func TestTailRetentionEmitsSpan(t *testing.T) {
 	}
 	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 0, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	if _, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "", nil, nil); err != nil {
-		t.Fatalf("TailRetention() error = %v", err)
+	if _, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "", nil, nil); err != nil {
+		t.Fatalf("tailRetentionStored() error = %v", err)
 	}
 
 	spans := exp.GetSpans()
@@ -510,8 +523,8 @@ func TestCompactionSpanRecordsTailRetentionThresholds(t *testing.T) {
 		Summarizer:         &fakeSummarizer{summary: "SUM"},
 	}
 
-	if _, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "", func([]*session.Event) int { return 1000 }, nil); err != nil {
-		t.Fatalf("TailRetention() error = %v", err)
+	if _, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "", func([]*session.Event) int { return 1000 }, nil); err != nil {
+		t.Fatalf("tailRetentionStored() error = %v", err)
 	}
 
 	spans := exp.GetSpans()
@@ -551,9 +564,9 @@ func TestCompactionSpanRecordsADecline(t *testing.T) {
 		Summarizer:         &fakeSummarizer{summary: "SUM"},
 	}
 
-	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "", func([]*session.Event) int { return 1000 }, nil)
+	got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "", func([]*session.Event) int { return 1000 }, nil)
 	if err != nil || got != nil {
-		t.Fatalf("TailRetention() = (%v, %v), want (nil, nil)", got, err)
+		t.Fatalf("tailRetentionStored() = (%v, %v), want (nil, nil)", got, err)
 	}
 
 	spans := exp.GetSpans()
@@ -597,8 +610,8 @@ func TestCompactionSpanOmitsAbsentTimestamps(t *testing.T) {
 	}
 	cfg := &compaction.Config{CompactionInterval: 2, Summarizer: &fakeSummarizer{summary: "SUM"}}
 
-	if _, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events}); err != nil {
-		t.Fatalf("SlidingWindow() error = %v", err)
+	if _, err := slidingWindowStored(context.Background(), cfg, &staticSession{events: events}); err != nil {
+		t.Fatalf("slidingWindowStored() error = %v", err)
 	}
 	a := attrs(exp.GetSpans()[0].Attributes)
 
@@ -609,5 +622,79 @@ func TestCompactionSpanOmitsAbsentTimestamps(t *testing.T) {
 	// rather than the attribute simply being dropped.
 	if _, ok := a["gen_ai.compaction.end_timestamp"]; !ok {
 		t.Error("end_timestamp is missing, want the bound that was recorded")
+	}
+}
+
+// TestCompactionSpanReportsADiscardedSummary pins that a summary the caller
+// threw away is not reported as a stored one.
+//
+// The span used to end when the summarizer returned, before any of the reasons
+// a caller discards a result: a cancelled turn, a failed re-read, a competing
+// compaction, a plugin rejecting it, a failed append. Every one of those left a
+// span saying the compaction succeeded, carrying a result_event_id that exists
+// in no session, so a trace could not distinguish a compaction that shrank a
+// prompt from one that spent a model call and changed nothing.
+func TestCompactionSpanReportsADiscardedSummary(t *testing.T) {
+	exp := spanRecorder(t)
+
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
+		textEvent("c", "inv2", 3, "q2"), modelTextEvent("d", "inv2", 4, "a2"),
+	}
+	cfg := &compaction.Config{CompactionInterval: 2, Summarizer: &fakeSummarizer{summary: "SUM"}}
+
+	summary, finish, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events}, "")
+	if err != nil || summary == nil {
+		t.Fatalf("SlidingWindow() = %v, %v, want a summary", summary, err)
+	}
+	// The caller decides not to keep it.
+	finish(nil, "another compaction covering the same events landed while summarizing")
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("recorded %d spans, want 1", len(spans))
+	}
+	a := attrs(spans[0].Attributes)
+	if got, ok := a["gen_ai.compaction.declined"]; !ok {
+		t.Error("the span does not say the summary was discarded")
+	} else if got.AsString() == "" {
+		t.Error("the discard reason is empty")
+	}
+	if _, ok := a["gen_ai.compaction.result_event_id"]; ok {
+		t.Error("the span names a result event, but nothing reached the session")
+	}
+}
+
+// TestCompactionSpanRecordsAPanicAsAnException pins that a panicking summarizer
+// is visible to an alert keyed on exception.type.
+//
+// The status was set to Error, which a dashboard sees, but no exception event
+// was recorded, so the panic itself was invisible to the usual alerting path.
+func TestCompactionSpanRecordsAPanicAsAnException(t *testing.T) {
+	exp := spanRecorder(t)
+
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
+		textEvent("c", "inv2", 3, "q2"), modelTextEvent("d", "inv2", 4, "a2"),
+	}
+	cfg := &compaction.Config{CompactionInterval: 2, Summarizer: &panickingSummarizer{}}
+
+	func() {
+		defer func() { _ = recover() }()
+		_, _, _ = SlidingWindow(context.Background(), cfg, &staticSession{events: events}, "")
+	}()
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("recorded %d spans, want 1", len(spans))
+	}
+	var sawException bool
+	for _, e := range spans[0].Events {
+		if e.Name == "exception" {
+			sawException = true
+		}
+	}
+	if !sawException {
+		t.Error("no exception event was recorded, so an alert keyed on exception.type misses a panicking summarizer")
 	}
 }

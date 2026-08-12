@@ -64,7 +64,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		if ctx.Err() != nil {
 			return
 		}
-		summary, err := compactioninternal.TailRetention(ctx, rt.Config(), sess, ctx.InvocationID(), promptTokenEstimator(ctx), rt)
+		summary, finish, err := compactioninternal.TailRetention(ctx, rt.Config(), sess, ctx.InvocationID(), promptTokenEstimator(ctx), rt)
 		if err != nil {
 			degrade(ctx, "token-threshold", err)
 			return
@@ -82,6 +82,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		// The read is only a comparison. The append below still goes to sess,
 		// for the identity reason above.
 		if ctx.Err() != nil {
+			finish(nil, "the turn ended before the summary could be stored")
 			return
 		}
 		latest, err := compactioninternal.ReloadSession(ctx, rt.SessionService(), sess)
@@ -90,18 +91,22 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 			// the middle of a turn whose tools may already have run. Failing to
 			// re-read means we cannot prove the summary is safe to keep, so it
 			// is dropped, but the turn continues.
+			finish(err, "")
 			degrade(ctx, "token-threshold", err)
 			return
 		}
 		if compactioninternal.RangeRaced(latest, sess, summary) {
+			finish(nil, "another compaction covering the same events landed while summarizing")
 			log.Printf("adk: discarding a tail-retention summary because the session changed inside its range while summarizing")
 			return
 		}
 
 		if err := rt.SessionService().AppendEvent(ctx, sess, summary); err != nil {
+			finish(err, "")
 			degrade(ctx, "failed to append the summary event", err)
 			return
 		}
+		finish(nil, "")
 		// The post-invocation sliding window checks this and stands down, so a
 		// turn that was compacted mid-flight is not summarized twice.
 		rt.MarkCompacted()

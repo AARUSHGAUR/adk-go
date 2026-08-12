@@ -122,16 +122,18 @@ func StartCompactEventsSpan(ctx context.Context, params StartCompactEventsSpanPa
 	if params.InvocationID != "" {
 		attrs = append(attrs, genAICompactionInvocationID.String(params.InvocationID))
 	}
-	// gen_ai.system names the system that produced the summary. The values come
-	// from this repo's semconv version, which prefixes them "gcp."; adk-python
-	// is on an older generation and emits the bare "gemini" and "vertex_ai".
-	// Consistency inside one implementation matters more here than matching the
-	// other's literal string, and the gap is repo-wide rather than compaction's.
-	switch params.Backend {
-	case genai.BackendVertexAI:
-		attrs = append(attrs, semconv.GenAISystemGCPVertexAI)
-	case genai.BackendGeminiAPI:
-		attrs = append(attrs, semconv.GenAISystemGCPGemini)
+	// gen_ai.system names the system that produced the summary, from the one
+	// definition this repo has for it, so a future change to that mapping
+	// reaches compaction too.
+	//
+	// Two known divergences from adk-python, both repo-wide rather than
+	// compaction's. The values come from this repo's semconv version, which
+	// prefixes them "gcp.", where adk-python is on an older generation and
+	// emits the bare "gemini" and "vertex_ai". And the attribute is omitted for
+	// a provider this mapping does not know, where adk-python always emits one:
+	// naming a provider we cannot identify would be worse than saying nothing.
+	if sys, ok := GenAISystemAttr(params.Backend); ok {
+		attrs = append(attrs, sys)
 	}
 	// Omit a threshold that is not configured, so a span carries only the
 	// knobs in play. Both strategies may be configured at once, so this says
@@ -156,6 +158,10 @@ type TraceCompactionResultParams struct {
 	ResultEvent *session.Event
 	// Error is the summarization failure, if any.
 	Error error
+	// DiscardReason, when set, says why a summary that was produced never
+	// reached the session. It is not an error: the turn was fine and the
+	// summary was simply not worth keeping.
+	DiscardReason string
 }
 
 // TraceCompactionResult records the outcome of a compaction on span.
@@ -165,6 +171,12 @@ type TraceCompactionResultParams struct {
 // produced nothing" from "ran and failed".
 func TraceCompactionResult(span trace.Span, params TraceCompactionResultParams) {
 	recordErrorAndStatus(span, params.Error)
+	if params.DiscardReason != "" {
+		// Produced but not kept. Recorded on the same key as a decline, because
+		// to anything reading the trace the outcome is the same: compaction was
+		// wanted, a model call was spent, and the prompt did not shrink.
+		span.SetAttributes(genAICompactionDeclined.String(params.DiscardReason))
+	}
 	if params.Error != nil {
 		// A failed compaction has no result to describe. A summarizer may
 		// return an event alongside an error, and the caller discards it, so
@@ -184,8 +196,12 @@ func TraceCompactionResult(span trace.Span, params TraceCompactionResultParams) 
 		if u.PromptTokenCount > 0 {
 			span.SetAttributes(genAICompactionInputTokens.Int(int(u.PromptTokenCount)))
 		}
-		if u.CandidatesTokenCount > 0 {
-			span.SetAttributes(genAICompactionOutputTokens.Int(int(u.CandidatesTokenCount)))
+		// Candidates plus thoughts, matching TraceGenerateContentResult in this
+		// package and the semconv note it cites. Counting candidates alone made
+		// two spans in one trace mean different things by the same key, and
+		// under-reported what a thinking model charged for the summary.
+		if out := u.CandidatesTokenCount + u.ThoughtsTokenCount; out > 0 {
+			span.SetAttributes(genAICompactionOutputTokens.Int(int(out)))
 		}
 	}
 	attrs := []attribute.KeyValue{genAICompactionResultEventID.String(ev.ID)}

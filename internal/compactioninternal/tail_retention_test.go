@@ -383,12 +383,12 @@ func TestTailRetention(t *testing.T) {
 				cfg = &copied
 			}
 
-			got, err := TailRetention(context.Background(), cfg, &staticSession{events: tc.events}, "", nil, nil)
+			got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: tc.events}, "", nil, nil)
 			if gotErr := err != nil; gotErr != tc.wantErr {
-				t.Fatalf("TailRetention() error = %v, wantErr %t", err, tc.wantErr)
+				t.Fatalf("tailRetentionStored() error = %v, wantErr %t", err, tc.wantErr)
 			}
 			if gotSummary := got != nil; gotSummary != tc.wantSummary {
-				t.Errorf("TailRetention() returned event = %t, want %t", gotSummary, tc.wantSummary)
+				t.Errorf("tailRetentionStored() returned event = %t, want %t", gotSummary, tc.wantSummary)
 			}
 			var gotWindow []string
 			if len(tc.summarizer.windows) > 0 {
@@ -412,32 +412,32 @@ func TestTailRetentionUsesTheEstimator(t *testing.T) {
 	summarizer := &fakeSummarizer{summary: "sum"}
 	cfg := &compaction.Config{TokenThreshold: 500, EventRetentionSize: 2, Summarizer: summarizer}
 
-	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "",
+	got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "",
 		func([]*session.Event) int { return 100 }, nil)
 	if err != nil {
-		t.Fatalf("TailRetention() error = %v", err)
+		t.Fatalf("tailRetentionStored() error = %v", err)
 	}
 	if got != nil {
-		t.Error("TailRetention() compacted despite an estimate below the threshold")
+		t.Error("tailRetentionStored() compacted despite an estimate below the threshold")
 	}
 
-	got, err = TailRetention(context.Background(), cfg, &staticSession{events: events}, "",
+	got, err = tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "",
 		func([]*session.Event) int { return 700 }, nil)
 	if err != nil {
-		t.Fatalf("TailRetention() error = %v", err)
+		t.Fatalf("tailRetentionStored() error = %v", err)
 	}
 	if got == nil {
-		t.Error("TailRetention() did not compact despite an estimate above the threshold")
+		t.Error("tailRetentionStored() did not compact despite an estimate above the threshold")
 	}
 }
 
 func TestTailRetentionRequiresSummarizer(t *testing.T) {
 	t.Parallel()
 
-	_, err := TailRetention(context.Background(), &compaction.Config{TokenThreshold: 1, EventRetentionSize: 0},
+	_, err := tailRetentionStored(context.Background(), &compaction.Config{TokenThreshold: 1, EventRetentionSize: 0},
 		&staticSession{events: []*session.Event{withUsage(modelTextEvent("a", "inv1", 1, "a"), 10)}}, "", nil, nil)
 	if err == nil {
-		t.Fatal("TailRetention() with no Summarizer returned nil error, want an error")
+		t.Fatal("tailRetentionStored() with no Summarizer returned nil error, want an error")
 	}
 }
 
@@ -450,12 +450,12 @@ func TestTailRetentionStampsTheSummary(t *testing.T) {
 	}
 	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 0, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "", nil, nil)
+	got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "", nil, nil)
 	if err != nil {
-		t.Fatalf("TailRetention() error = %v", err)
+		t.Fatalf("tailRetentionStored() error = %v", err)
 	}
 	if got == nil {
-		t.Fatal("TailRetention() produced no summary")
+		t.Fatal("tailRetentionStored() produced no summary")
 	}
 	// The event must be ready to append without the caller filling anything in.
 	if got.ID == "" {
@@ -485,12 +485,12 @@ func TestTailRetentionThenApplyShrinksHistory(t *testing.T) {
 	}
 	cfg := &compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2, Summarizer: &fakeSummarizer{summary: "SUMMARY"}}
 
-	summary, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "", nil, nil)
+	summary, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "", nil, nil)
 	if err != nil {
-		t.Fatalf("TailRetention() error = %v", err)
+		t.Fatalf("tailRetentionStored() error = %v", err)
 	}
 	if summary == nil {
-		t.Fatal("TailRetention() produced no summary")
+		t.Fatal("tailRetentionStored() produced no summary")
 	}
 	summary.ID = "s1"
 
@@ -626,12 +626,12 @@ func TestTailRetentionReArmsTheGateBelowTheThreshold(t *testing.T) {
 	gate := &recordingGate{allow: true}
 	cfg := &compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "", nil, gate)
+	got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "", nil, gate)
 	if err != nil {
-		t.Fatalf("TailRetention() error = %v", err)
+		t.Fatalf("tailRetentionStored() error = %v", err)
 	}
 	if got != nil {
-		t.Fatalf("TailRetention() returned a summary at 100 tokens against a 1000 threshold")
+		t.Fatalf("tailRetentionStored() returned a summary at 100 tokens against a 1000 threshold")
 	}
 	if gate.recovered != 1 {
 		t.Errorf("Recovered() called %d times, want 1: a prompt under the threshold means the last compaction worked", gate.recovered)
@@ -654,8 +654,8 @@ func TestTailRetentionDoesNotRecordAFailedAttempt(t *testing.T) {
 	gate := &recordingGate{allow: true}
 	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 2, Summarizer: &fakeSummarizer{err: errors.New("boom")}}
 
-	if _, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "", nil, gate); err == nil {
-		t.Fatal("TailRetention() error = nil, want the summarizer failure")
+	if _, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "", nil, gate); err == nil {
+		t.Fatal("tailRetentionStored() error = nil, want the summarizer failure")
 	}
 	if len(gate.recorded) != 0 {
 		t.Errorf("RecordAt called %v after a failed summarization, want no calls", gate.recorded)
@@ -674,9 +674,9 @@ func TestTailRetentionRecordsASuccessfulCompaction(t *testing.T) {
 	gate := &recordingGate{allow: true}
 	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 2, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "", nil, gate)
+	got, err := tailRetentionStored(context.Background(), cfg, &staticSession{events: events}, "", nil, gate)
 	if err != nil || got == nil {
-		t.Fatalf("TailRetention() = %v, %v, want a summary and no error", got, err)
+		t.Fatalf("tailRetentionStored() = %v, %v, want a summary and no error", got, err)
 	}
 	if diff := cmp.Diff([]int{900}, gate.recorded); diff != "" {
 		t.Errorf("RecordAt calls mismatch (-want +got):\n%s", diff)

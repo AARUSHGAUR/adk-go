@@ -127,12 +127,12 @@ func TestSlidingWindow(t *testing.T) {
 				cfg = &copied
 			}
 
-			got, err := SlidingWindow(context.Background(), cfg, &staticSession{events: tc.events})
+			got, err := slidingWindowStored(context.Background(), cfg, &staticSession{events: tc.events})
 			if gotErr := err != nil; gotErr != tc.wantErr {
-				t.Fatalf("SlidingWindow() error = %v, wantErr %t", err, tc.wantErr)
+				t.Fatalf("slidingWindowStored() error = %v, wantErr %t", err, tc.wantErr)
 			}
 			if gotSummary := got != nil; gotSummary != tc.wantSummary {
-				t.Errorf("SlidingWindow() returned event = %t, want %t", gotSummary, tc.wantSummary)
+				t.Errorf("slidingWindowStored() returned event = %t, want %t", gotSummary, tc.wantSummary)
 			}
 			var gotWindow []string
 			if len(tc.summarizer.windows) > 0 {
@@ -151,21 +151,21 @@ func TestSlidingWindowRequiresSummarizer(t *testing.T) {
 	// The runner resolves a default summarizer at construction, so reaching the
 	// compactor without one is a programming error worth surfacing loudly
 	// rather than silently skipping every compaction.
-	_, err := SlidingWindow(context.Background(), &compaction.Config{CompactionInterval: 1}, &staticSession{})
+	_, err := slidingWindowStored(context.Background(), &compaction.Config{CompactionInterval: 1}, &staticSession{})
 	if err == nil {
-		t.Fatal("SlidingWindow() with no Summarizer returned nil error, want an error")
+		t.Fatal("slidingWindowStored() with no Summarizer returned nil error, want an error")
 	}
 }
 
 func TestSlidingWindowNilSession(t *testing.T) {
 	t.Parallel()
 
-	got, err := SlidingWindow(context.Background(), &compaction.Config{CompactionInterval: 1, Summarizer: &fakeSummarizer{}}, nil)
+	got, err := slidingWindowStored(context.Background(), &compaction.Config{CompactionInterval: 1, Summarizer: &fakeSummarizer{}}, nil)
 	if err != nil {
-		t.Fatalf("SlidingWindow() error = %v", err)
+		t.Fatalf("slidingWindowStored() error = %v", err)
 	}
 	if got != nil {
-		t.Errorf("SlidingWindow() = %v, want nil for a nil session", got)
+		t.Errorf("slidingWindowStored() = %v, want nil for a nil session", got)
 	}
 }
 
@@ -182,12 +182,12 @@ func TestSlidingWindowSucceedingCompactions(t *testing.T) {
 		textEvent("c", "inv2", 3, "q2"), modelTextEvent("d", "inv2", 4, "a2"),
 	}
 
-	first, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events})
+	first, err := slidingWindowStored(context.Background(), cfg, &staticSession{events: events})
 	if err != nil {
-		t.Fatalf("first SlidingWindow() error = %v", err)
+		t.Fatalf("first slidingWindowStored() error = %v", err)
 	}
 	if first == nil {
-		t.Fatal("first SlidingWindow() produced no summary")
+		t.Fatal("first slidingWindowStored() produced no summary")
 	}
 	first.ID = "s1"
 	first.Timestamp = at(5)
@@ -195,22 +195,22 @@ func TestSlidingWindowSucceedingCompactions(t *testing.T) {
 
 	// One more invocation is not enough.
 	events = append(events, textEvent("e", "inv3", 6, "q3"), modelTextEvent("f", "inv3", 7, "a3"))
-	mid, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events})
+	mid, err := slidingWindowStored(context.Background(), cfg, &staticSession{events: events})
 	if err != nil {
-		t.Fatalf("second SlidingWindow() error = %v", err)
+		t.Fatalf("second slidingWindowStored() error = %v", err)
 	}
 	if mid != nil {
-		t.Errorf("SlidingWindow() compacted after only one new invocation, want nil")
+		t.Errorf("slidingWindowStored() compacted after only one new invocation, want nil")
 	}
 
 	// The second invocation crosses the interval again.
 	events = append(events, textEvent("g", "inv4", 8, "q4"), modelTextEvent("h", "inv4", 9, "a4"))
-	third, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events})
+	third, err := slidingWindowStored(context.Background(), cfg, &staticSession{events: events})
 	if err != nil {
-		t.Fatalf("third SlidingWindow() error = %v", err)
+		t.Fatalf("third slidingWindowStored() error = %v", err)
 	}
 	if third == nil {
-		t.Fatal("third SlidingWindow() produced no summary")
+		t.Fatal("third slidingWindowStored() produced no summary")
 	}
 
 	want := [][]string{

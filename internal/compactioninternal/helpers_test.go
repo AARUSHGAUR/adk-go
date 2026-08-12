@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -175,3 +176,18 @@ func (m *fakeModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ 
 }
 
 var _ model.LLM = (*fakeModel)(nil)
+
+// slidingWindowStored runs SlidingWindow and closes the span the way a caller
+// that stored the summary does, which is what most tests mean.
+func slidingWindowStored(ctx context.Context, cfg *compaction.Config, sess session.Session) (*session.Event, error) {
+	ev, finish, err := SlidingWindow(ctx, cfg, sess, "")
+	finish(err, "")
+	return ev, err
+}
+
+// tailRetentionStored is slidingWindowStored for the tail-retention strategy.
+func tailRetentionStored(ctx context.Context, cfg *compaction.Config, sess session.Session, liveInvocationID string, estimate TokenCounter, progress ProgressGate) (*session.Event, error) {
+	ev, finish, err := TailRetention(ctx, cfg, sess, liveInvocationID, estimate, progress)
+	finish(err, "")
+	return ev, err
+}

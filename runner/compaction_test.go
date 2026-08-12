@@ -900,12 +900,19 @@ func textOfContent(c *genai.Content) string {
 }
 
 // TestCompactionSpanJoinsTheCallersTrace checks that compaction is traced
-// alongside the turn rather than in a trace of its own.
+// inside the caller's trace rather than in one of its own, and names the turn
+// that triggered it.
 //
-// Compaction runs after the invocation has finished, so it is not a child of
-// the turn's span and should not pretend to be: the turn has ended by then.
-// What it must do is stay in the same trace, so the two are visible together,
-// and name the invocation so they can be joined.
+// Compaction runs from a defer, after the invocation has ended, so it is not a
+// child of the turn's span and should not pretend to be. What it must do is
+// stay in the caller's trace, and carry the invocation ID so the two can be
+// joined.
+//
+// Known gap, not asserted here because it is not yet true: with no ambient
+// caller span the compaction span is a root of its own, separate from the
+// turn's own root. Closing that needs the invocation's span context to reach
+// the runner, which it does not today, since the agent derives it internally
+// and only passes it to its own children.
 func TestCompactionSpanJoinsTheCallersTrace(t *testing.T) {
 	exp := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
@@ -922,25 +929,34 @@ func TestCompactionSpanJoinsTheCallersTrace(t *testing.T) {
 	drain(t, r.Run(ctx, userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}))
 	outer.End()
 
-	var compaction, turn bool
-	traces := map[string]bool{}
+	var compactionTrace, turnTrace, named string
 	for _, sp := range exp.GetSpans() {
-		traces[sp.SpanContext.TraceID().String()] = true
-		if strings.HasPrefix(sp.Name, "compact_events") {
-			compaction = true
+		switch {
+		case strings.HasPrefix(sp.Name, "compact_events"):
+			compactionTrace = sp.SpanContext.TraceID().String()
 			if !sp.Parent.IsValid() {
 				t.Error("the compaction span has no parent, so it escaped the caller's trace")
 			}
-		}
-		if strings.HasPrefix(sp.Name, "invoke_agent") {
-			turn = true
+			for _, a := range sp.Attributes {
+				if string(a.Key) == "gcp.vertex.agent.invocation_id" {
+					named = a.Value.AsString()
+				}
+			}
+		case strings.HasPrefix(sp.Name, "invoke_agent"):
+			turnTrace = sp.SpanContext.TraceID().String()
 		}
 	}
-	if !compaction || !turn {
-		t.Fatalf("missing spans: compaction=%v turn=%v", compaction, turn)
+	if compactionTrace == "" || turnTrace == "" {
+		t.Fatalf("missing spans: compaction=%q turn=%q", compactionTrace, turnTrace)
 	}
-	if len(traces) != 1 {
-		t.Errorf("spans span %d traces, want 1: compaction is not in the same trace as the turn", len(traces))
+	if compactionTrace != turnTrace {
+		t.Errorf("compaction is in trace %s and the turn in %s, so they cannot be seen together",
+			compactionTrace, turnTrace)
+	}
+	// The correlation attribute is the only join between the two, so a span
+	// without it cannot be tied to its turn at all.
+	if named == "" {
+		t.Error("the compaction span does not name the invocation that triggered it")
 	}
 }
 

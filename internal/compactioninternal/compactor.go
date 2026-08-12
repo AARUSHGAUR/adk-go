@@ -56,61 +56,107 @@ func HasTailRetention(cfg *compaction.Config) bool {
 // The runner calls this after an invocation finishes and all of its events have
 // been persisted; compacting mid-invocation is the tail-retention strategy's
 // job.
-func SlidingWindow(ctx context.Context, cfg *compaction.Config, sess session.Session) (*session.Event, error) {
+//
+// The returned [Finish] must be called exactly once with what became of the
+// summary, which is what closes its span. It is never nil.
+func SlidingWindow(ctx context.Context, cfg *compaction.Config, sess session.Session, invocationID string) (*session.Event, Finish, error) {
+	noop := func(error, string) {}
 	if !HasSlidingWindow(cfg) {
-		return nil, nil
+		return nil, noop, nil
 	}
 	if cfg.Summarizer == nil {
-		return nil, fmt.Errorf("no Summarizer configured")
+		return nil, noop, fmt.Errorf("no Summarizer configured")
 	}
 	if sess == nil {
-		return nil, nil
+		return nil, noop, nil
 	}
 
 	events := collect(sess)
 	window := selectSlidingWindow(events, cfg.CompactionInterval, cfg.OverlapSize)
 	if len(window) == 0 {
-		return nil, nil
+		return nil, noop, nil
 	}
 
-	summary, err := summarizeTraced(ctx, cfg, sess, telemetry.CompactionTriggerSlidingWindow, window)
+	summary, finish, err := summarizeTraced(ctx, cfg, sess, invocationID, telemetry.CompactionTriggerSlidingWindow, window)
 	if err != nil {
-		return nil, fmt.Errorf("sliding-window summarization failed: %w", err)
+		return nil, noop, fmt.Errorf("sliding-window summarization failed: %w", err)
 	}
-	return summary, nil
+	return summary, finish, nil
 }
+
+// Finish reports what became of a summary and closes its span.
+//
+// A summarization is not over when the summarizer returns. The caller still has
+// to decide whether to keep the result, and it can throw it away for half a
+// dozen reasons: a cancelled turn, a failed re-read, a competing compaction, a
+// plugin rejecting it, or a failed append. Ending the span at the summarizer
+// left every one of those reporting success, with a result_event_id naming an
+// event that exists in no session.
+//
+// Exactly one call, and the summary is not stored until it is made.
+type Finish func(err error, discardReason string)
 
 // summarizeTraced runs the configured summarizer inside a compact_events span,
 // validates what comes back, and stamps it.
 //
-// Stamping happens before the result is recorded so the span carries a real
-// event ID rather than an empty one. The span covers an actual summarization
-// only, so its presence in a trace means compaction really ran. A trigger that
-// was evaluated and declined produces nothing, which keeps the signal useful.
-func summarizeTraced(ctx context.Context, cfg *compaction.Config, sess session.Session, trigger string, window []*session.Event) (*session.Event, error) {
+// The span stays open until the returned [Finish] is called, so it reports what
+// actually happened to the summary rather than what the summarizer returned.
+// Its presence in a trace still means compaction really ran: a trigger that was
+// evaluated and declined produces a decline span instead.
+func summarizeTraced(ctx context.Context, cfg *compaction.Config, sess session.Session, invocationID, trigger string, window []*session.Event) (*session.Event, Finish, error) {
 	sessionID := ""
 	if sess != nil {
 		sessionID = sess.ID()
 	}
-	// The turn that triggered this compaction, taken from the newest event in
-	// the session. The span is not a child of that turn's span, so without an
-	// attribute there is no way to ask which turn a compaction belonged to.
+	// The turn that triggered this compaction. The span is not a child of that
+	// turn's span, so this attribute is the only way to ask which turn a
+	// compaction belonged to.
 	//
-	// The newest event rather than the newest one in the window: the window is
-	// what is being summarized, which for tail retention deliberately excludes
-	// the turn in progress, and it is that turn we want to name.
-	ctx, span := telemetry.StartCompactEventsSpan(ctx, spanParams(cfg, sessionID, latestInvocationID(sess), trigger, len(window)))
+	// The caller passes it, because the caller knows. Reading the newest event
+	// in the session instead was a guess that went wrong exactly when it
+	// mattered: with two invocations in flight on one session, both compactions
+	// read the same newest event, so at least one named a turn that did not
+	// cause it. The fallback remains for a caller that has no ID to give.
+	if invocationID == "" {
+		invocationID = latestInvocationID(sess)
+	}
+	ctx, span := telemetry.StartCompactEventsSpan(ctx, spanParams(cfg, sessionID, invocationID, trigger, len(window)))
+
+	var summary *session.Event
+	var finished bool
+	finish := func(err error, discardReason string) {
+		if finished {
+			return
+		}
+		finished = true
+		stored := summary
+		if err != nil || discardReason != "" {
+			// Nothing reached the session, so naming a result would point at an
+			// event no session holds.
+			stored = nil
+		}
+		telemetry.TraceCompactionResult(span, telemetry.TraceCompactionResultParams{
+			ResultEvent:   stored,
+			Error:         err,
+			DiscardReason: discardReason,
+		})
+		span.End()
+	}
+
 	// A Summarizer is third-party code and may panic. The OTel SDK records an
 	// exception event on the way out but leaves the status Unset, which reads
 	// as success, so a panicking summarizer would look like a healthy one that
-	// happened to produce nothing. Mark it and let the panic continue.
+	// happened to produce nothing. Mark it, record it as an exception so an
+	// alert keyed on exception.type sees it, and let the panic continue.
 	defer func() {
 		if r := recover(); r != nil {
-			span.SetStatus(codes.Error, fmt.Sprintf("summarizer panicked: %v", r))
+			err := fmt.Errorf("summarizer panicked: %v", r)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			span.End()
+			finished = true
 			panic(r)
 		}
-		span.End()
 	}()
 
 	content, usage, err := cfg.Summarizer.SummarizeEvents(ctx, window)
@@ -119,7 +165,6 @@ func summarizeTraced(ctx context.Context, cfg *compaction.Config, sess session.S
 	// and nothing else. Everything that decides what happens to history -- the
 	// covered range, the authorship, the actions -- is derived here from the
 	// window that was handed over.
-	var summary *session.Event
 	switch {
 	case err != nil:
 	case content == nil:
@@ -137,14 +182,16 @@ func summarizeTraced(ctx context.Context, cfg *compaction.Config, sess session.S
 	} else {
 		summary = stamp(ctx, summary)
 	}
-	telemetry.TraceCompactionResult(span, telemetry.TraceCompactionResultParams{
-		ResultEvent: summary,
-		Error:       err,
-	})
 	if err != nil {
-		return nil, err
+		finish(err, "")
+		return nil, nil, err
 	}
-	return summary, nil
+	if summary == nil {
+		// A decline. Nothing further can happen to it, so close the span here.
+		finish(nil, "")
+		return nil, func(error, string) {}, nil
+	}
+	return summary, finish, nil
 }
 
 // stamp fills in the identity fields a [Summarizer] leaves blank, so the

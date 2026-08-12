@@ -57,21 +57,22 @@ type ProgressGate interface {
 // which is what lets it react to a single long turn rather than waiting for the
 // turn to end. Callers must run it before assembling contents so the fresh
 // summary is reflected in the request.
-func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Session, liveInvocationID string, estimate TokenCounter, progress ProgressGate) (*session.Event, error) {
+func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Session, liveInvocationID string, estimate TokenCounter, progress ProgressGate) (*session.Event, Finish, error) {
+	noop := func(error, string) {}
 	if !HasTailRetention(cfg) {
-		return nil, nil
+		return nil, noop, nil
 	}
 	if cfg.Summarizer == nil {
-		return nil, fmt.Errorf("no Summarizer configured")
+		return nil, noop, fmt.Errorf("no Summarizer configured")
 	}
 	if sess == nil {
-		return nil, nil
+		return nil, noop, nil
 	}
 
 	events := collect(sess)
 	tokens, ok := promptTokenCount(events, estimate)
 	if !ok {
-		return nil, nil
+		return nil, noop, nil
 	}
 	if tokens < cfg.TokenThreshold {
 		// Under the threshold, so any earlier compaction in this turn did its
@@ -79,7 +80,7 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		if progress != nil {
 			progress.Recovered()
 		}
-		return nil, nil
+		return nil, noop, nil
 	}
 
 	// Stop here when the last compaction in this turn has not yet brought the
@@ -88,7 +89,7 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 	// call each time.
 	if progress != nil && !progress.AllowAt(tokens) {
 		traceDeclined(ctx, cfg, sess, telemetry.CompactionTriggerTokenThreshold, "the previous compaction did not bring the prompt back under the threshold")
-		return nil, nil
+		return nil, noop, nil
 	}
 
 	window := selectTailRetentionWindow(events, cfg.EventRetentionSize, liveInvocationID)
@@ -99,12 +100,12 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		// indistinguishable from an idle session, while the prompt keeps growing
 		// on every turn, so it is recorded.
 		traceDeclined(ctx, cfg, sess, telemetry.CompactionTriggerTokenThreshold, "no compactable window past the retained tail")
-		return nil, nil
+		return nil, noop, nil
 	}
 
-	summary, err := summarizeTraced(ctx, cfg, sess, telemetry.CompactionTriggerTokenThreshold, window)
+	summary, finish, err := summarizeTraced(ctx, cfg, sess, liveInvocationID, telemetry.CompactionTriggerTokenThreshold, window)
 	if err != nil {
-		return nil, fmt.Errorf("tail-retention summarization failed: %w", err)
+		return nil, noop, fmt.Errorf("tail-retention summarization failed: %w", err)
 	}
 	// Recorded only now. A failed attempt must leave the gate as it found it,
 	// or one transient summarizer error disarms compaction for the rest of the
@@ -112,7 +113,7 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 	if progress != nil && summary != nil {
 		progress.RecordAt(tokens)
 	}
-	return summary, nil
+	return summary, finish, nil
 }
 
 // charsPerToken is the crude characters-to-tokens ratio used when no model has
