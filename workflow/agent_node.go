@@ -192,28 +192,40 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 // alone latches: history never un-answers an interrupt, so a later loop-back,
 // retry or per-item activation of the same node would lose its input too.
 //
-// Interrupts are attributed as rehydration attributes them (NodeInfo.Path,
-// Author as the fallback), so a pause raised by a delegated sub-agent counts as
-// this node's — matching the engine, which parks and re-enters the node on
-// exactly those interrupts.
+// Interrupts are attributed by the activation's node PATH ("orch@1/child@2"),
+// which the scheduler stamps on every event leaving a node. The path, not the
+// node name, is the identity that matters: an orchestrator delegating the same
+// child twice produces child@1 and child@2, and only the delegation that
+// paused may drop its input. A pause raised by a sub-agent the node's agent
+// delegated to carries the node's own path, so it still counts as this node's
+// — matching the engine, which parks and re-enters the node on exactly those
+// interrupts.
 func (n *AgentNode) isResuming(ctx agent.Context) bool {
 	ra, ok := ctx.(interface{ IsResumeActivation() bool })
 	if !ok || !ra.IsResumeActivation() {
 		return false
 	}
-	return raisedInterrupt(ctx.Session(), ctx.InvocationID(), n.Name())
+	return raisedInterrupt(ctx.Session(), ctx.InvocationID(), ctx.Path(), n.Name())
 }
 
-// raisedInterrupt reports whether nodeName raised a long-running interrupt in
-// invocationID. Runs only on a resume activation, keeping the scan off the
-// normal path.
-func raisedInterrupt(sess session.Session, invocationID, nodeName string) bool {
-	if sess == nil {
+// raisedInterrupt reports whether the activation at nodePath raised a
+// long-running interrupt in invocationID. Runs only on a resume activation,
+// keeping the scan off the normal path.
+//
+// nodePath is empty for a root-wrapper activation, where the scheduler stamps
+// the bare node name instead. An event carrying no path at all is attributed by
+// Author, the same fallback rehydration's eventNodeName uses.
+func raisedInterrupt(sess session.Session, invocationID, nodePath, nodeName string) bool {
+	if sess == nil || nodeName == "" {
 		return false
 	}
 	events := sess.Events()
 	if events == nil {
 		return false
+	}
+	want := nodePath
+	if want == "" {
+		want = nodeName
 	}
 	for i := 0; i < events.Len(); i++ {
 		ev := events.At(i)
@@ -223,25 +235,33 @@ func raisedInterrupt(sess session.Session, invocationID, nodeName string) bool {
 		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
-		if ev.Author == nodeName {
-			return true
+		if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
+			if samePathActivation(ev.NodeInfo.Path, want) {
+				return true
+			}
+			continue
 		}
-		if ev.NodeInfo != nil && nodePathHas(ev.NodeInfo.Path, nodeName) {
+		if ev.Author == nodeName {
 			return true
 		}
 	}
 	return false
 }
 
-// nodePathHas reports whether a node path ("parent@1/child@2") has a segment
-// naming nodeName — the segment walk eventNodeName uses for attribution.
-func nodePathHas(path, nodeName string) bool {
-	for _, seg := range strings.Split(path, "/") {
-		if name, _, _ := strings.Cut(seg, "@"); name == nodeName {
-			return true
-		}
+// samePathActivation reports whether an event's node path names the same
+// activation as nodePath. It compares trailing segments rather than the whole
+// string: a workflow agent records its events under its own prefix
+// ("wf@1/worker@1") while a later Resume rebuilds the node path without it
+// ("worker@1"), so exact equality would miss a node's own pause across the
+// turn boundary.
+func samePathActivation(evPath, nodePath string) bool {
+	if evPath == nodePath {
+		return true
 	}
-	return false
+	if evPath == "" || nodePath == "" {
+		return false
+	}
+	return strings.HasSuffix(evPath, "/"+nodePath) || strings.HasSuffix(nodePath, "/"+evPath)
 }
 
 // synthesizeAgentOutput sets Event.Output from concatenated model

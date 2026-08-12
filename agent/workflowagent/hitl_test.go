@@ -845,3 +845,36 @@ func hasOutput(events []*session.Event, want any) bool {
 	}
 	return false
 }
+
+// TestWorkflowAgent_UnmatchedFunctionResponseRunsFresh pins that dropping the
+// function-name filter did not turn every function-response turn into a resume.
+// A reply that answers no waiting interrupt must fall through to a fresh
+// Workflow.Run, as it did before the ID-keyed matching landed — the runner
+// deliberately allows a turn to carry both text and a function response
+// (see runner.buildResumeResponses, which filters the same way).
+func TestWorkflowAgent_UnmatchedFunctionResponseRunsFresh(t *testing.T) {
+	var upstream atomic.Int32
+	asker := newAskerNode("approval", "decide", nil)
+	a := makeAgent(t, workflow.Chain(workflow.Start,
+		newCountingHandlerNode("upstream", &upstream), asker))
+	sess := newFakeSession()
+
+	runFreshTurn(t, sess, a, "start")
+	if got := upstream.Load(); got != 1 {
+		t.Fatalf("upstream runs after turn 1 = %d, want 1", got)
+	}
+
+	// A function response that answers nothing, alongside real user text.
+	msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{Text: "forget it, start over"},
+		{FunctionResponse: &genai.FunctionResponse{
+			ID: "unrelated-call", Name: "get_weather", Response: map[string]any{"temp": 20},
+		}},
+	}}
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, msg)), nil)
+
+	if got := upstream.Load(); got != 2 {
+		t.Errorf("upstream runs after the unmatched reply = %d, want 2 (a fresh run); "+
+			"the turn was misrouted to Resume and the user's text was dropped", got)
+	}
+}

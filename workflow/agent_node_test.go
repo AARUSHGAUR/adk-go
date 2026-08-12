@@ -1068,3 +1068,118 @@ func (n *resumeAskerNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event
 		yield(NewRequestInputEvent(ctx, session.RequestInput{InterruptID: n.id, Message: "?"}), nil)
 	}
 }
+
+// TestAgentNode_RedelegatedChildKeepsInput pins the other half of
+// TestAgentNode_FreshDynamicChildKeepsInput: a dynamic child that paused
+// earlier and is delegated AGAIN, with new input, during the resumed
+// orchestrator's body. The child inherits the ancestor's resume context, so
+// the per-activation flag alone cannot tell the two delegations apart —
+// attribution has to be per node PATH (child@1 vs child@2), not per node name.
+func TestAgentNode_RedelegatedChildKeepsInput(t *testing.T) {
+	const (
+		invocation  = "test-invocation-id"
+		interruptID = "ask-1"
+	)
+	probe := &pausingProbeAgent{interrID: interruptID}
+	child, err := NewAgentNode(probe.new(t, "child"), NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	orchestrator := NewDynamicNode[any, string]("orch",
+		func(nc agent.Context, _ any, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[any](nc, child, "first"); err != nil {
+				return "", err
+			}
+			out, err := RunNode[any](nc, child, "second")
+			s, _ := out.(string)
+			return s, err
+		}, NodeConfig{})
+	w := mustNew(t, []Edge{{From: Start, To: orchestrator}})
+
+	ctx1 := newSeededMockCtx(t)
+	ctx1.sess = &eventsSession{events: sliceEvents{}}
+	var history sliceEvents
+	for ev, err := range w.Run(ctx1) {
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if ev.InvocationID == "" {
+			ev.InvocationID = invocation
+		}
+		history = append(history, ev)
+	}
+	history = append(history, answeredEvent(invocation, interruptID))
+
+	sess := &eventsSession{events: history}
+	state, err := w.ReconstructRunState(sess, invocation)
+	if err != nil {
+		t.Fatalf("ReconstructRunState: %v", err)
+	}
+	if state == nil {
+		t.Fatal("no run state rehydrated")
+	}
+	ctx2 := newSeededMockCtx(t)
+	ctx2.sess = sess
+	for _, err := range w.Resume(agent.NewContext(ctx2), state, map[string]any{interruptID: "ok"}) {
+		if err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+	}
+	// activation 0: turn 1, "first" (paused). activation 1: the replayed
+	// child@1 — input correctly dropped. activation 2: the fresh child@2.
+	if got := probe.activation(t, 1); got != nil {
+		t.Errorf("replayed child@1 got input %v, want none (it is the paused delegation)", got)
+	}
+	if got := probe.activation(t, 2); got == nil {
+		t.Error("re-delegated child@2 lost its input; a fresh delegation must keep it")
+	}
+}
+
+// pausingProbeAgent parks its node on the first activation with a real
+// RequestInput pause (a bare LongRunningToolIDs event does not halt a
+// delegating orchestrator's body), and records every activation's input.
+type pausingProbeAgent struct {
+	mu       sync.Mutex
+	inputs   []*genai.Content
+	interrID string
+}
+
+func (p *pausingProbeAgent) new(t *testing.T, name string) agent.Agent {
+	t.Helper()
+	a, err := agent.New(agent.Config{
+		Name: name,
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				p.mu.Lock()
+				n := len(p.inputs)
+				p.inputs = append(p.inputs, ctx.UserContent())
+				p.mu.Unlock()
+
+				if n == 0 {
+					yield(NewRequestInputEvent(ctx, session.RequestInput{
+						InterruptID: p.interrID, Message: "?",
+					}), nil)
+					return
+				}
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = name
+				ev.Output = "out"
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	return a
+}
+
+func (p *pausingProbeAgent) activation(t *testing.T, i int) *genai.Content {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if i >= len(p.inputs) {
+		t.Fatalf("activation %d missing; node ran %d time(s)", i+1, len(p.inputs))
+	}
+	return p.inputs[i]
+}

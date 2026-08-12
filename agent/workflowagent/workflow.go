@@ -142,11 +142,25 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 	// tool's long-running request (adk_request_credential /
 	// adk_request_confirmation), not just the workflow's own
 	// adk_request_input, and the engine's pause is name-agnostic
-	// (Event.LongRunningToolIDs). A stale response matches nothing, so
-	// Workflow.Resume yields ErrNothingToResume instead of a silent fresh Run.
+	// (Event.LongRunningToolIDs).
+	//
+	// A response only routes this turn to Resume when it is actually aimed at
+	// this run: either its ID is an interrupt the run knows about, or it is
+	// explicitly an answer to the workflow's own input request. Otherwise the
+	// turn falls through to a fresh Run, as it did before ID-keyed matching —
+	// a turn may legitimately carry both text and an unrelated tool reply, and
+	// routing that to Resume would fail it with ErrNothingToResume and discard
+	// the text. Mirrors runner.buildResumeResponses, which filters the same way.
+	//
+	// A wrong-but-deliberate answer (right name, unknown ID) still reaches
+	// Resume, so the caller keeps the ErrNothingToResume diagnostic.
+	known := knownInterruptIDs(state)
 	responses := map[string]any{}
 	for _, fr := range frs {
 		if fr == nil || fr.ID == "" {
+			continue
+		}
+		if _, ok := known[fr.ID]; !ok && fr.Name != workflow.WorkflowInputFunctionCallName {
 			continue
 		}
 		responses[fr.ID] = utils.UnwrapResponse(fr.Response)
@@ -156,4 +170,32 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 	}
 
 	return responses, state, true, nil
+}
+
+// knownInterruptIDs collects the interrupt IDs of nodes the rehydrated run can
+// still act on — those waiting for an answer, and those a re-entry node is
+// about to be re-run with. A node that already settled is excluded, so a reply
+// to an interrupt this run has finished with no longer counts as a resume.
+//
+// ResumedInputs is included, not just Interrupts: the runner appends the reply
+// to the session before the agent runs, so on a genuine first resume the
+// interrupt is already resolved and rehydration hands it back on the node.
+func knownInterruptIDs(state *workflow.RunState) map[string]struct{} {
+	ids := map[string]struct{}{}
+	for _, ns := range state.Nodes {
+		if ns == nil || (ns.Status != workflow.NodeWaiting && ns.Status != workflow.NodePending) {
+			continue
+		}
+		for _, id := range ns.Interrupts {
+			if id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+		for id := range ns.ResumedInputs {
+			if id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+	}
+	return ids
 }
