@@ -34,6 +34,17 @@ import (
 // means the count could not be determined, which suppresses compaction.
 type TokenCounter func(events []*session.Event) int
 
+// ProgressGate decides whether another compaction at a given prompt size is
+// worth attempting, and remembers the ones that happen.
+//
+// It exists so the caller can stop compaction repeating uselessly within one
+// turn without this package needing to know what an invocation is.
+type ProgressGate interface {
+	AllowAt(tokens int) bool
+	RecordAt(tokens int)
+	Recovered()
+}
+
 // TailRetention summarizes everything but the most recent events once the
 // prompt has grown past cfg.TokenThreshold, and returns the resulting
 // compaction event, ready for the caller to append to the session.
@@ -46,16 +57,6 @@ type TokenCounter func(events []*session.Event) int
 // which is what lets it react to a single long turn rather than waiting for the
 // turn to end. Callers must run it before assembling contents so the fresh
 // summary is reflected in the request.
-// ProgressGate decides whether another compaction at a given prompt size is
-// worth attempting, and remembers the ones that happen.
-//
-// It exists so the caller can stop compaction repeating uselessly within one
-// turn without this package needing to know what an invocation is.
-type ProgressGate interface {
-	AllowAt(tokens int) bool
-	RecordAt(tokens int)
-}
-
 func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Session, estimate TokenCounter, progress ProgressGate) (*session.Event, error) {
 	if !HasTailRetention(cfg) {
 		return nil, nil
@@ -69,15 +70,24 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 
 	events := collect(sess)
 	tokens, ok := promptTokenCount(events, estimate)
-	if !ok || tokens < cfg.TokenThreshold {
+	if !ok {
+		return nil, nil
+	}
+	if tokens < cfg.TokenThreshold {
+		// Under the threshold, so any earlier compaction in this turn did its
+		// job. Re-arm, or a turn that grows again could never compact again.
+		if progress != nil {
+			progress.Recovered()
+		}
 		return nil, nil
 	}
 
-	// Stop here when the last compaction in this turn did not shrink the prompt.
-	// Compacting again would summarize a little more and leave the prompt just
-	// as far over the threshold, paying for a model call each time.
+	// Stop here when the last compaction in this turn has not yet brought the
+	// prompt back under the threshold. Compacting again would summarize a
+	// little more and leave the prompt just as far over it, paying for a model
+	// call each time.
 	if progress != nil && !progress.AllowAt(tokens) {
-		traceDeclined(ctx, cfg, sess, telemetry.CompactionTriggerTokenThreshold, "the previous compaction did not reduce the prompt")
+		traceDeclined(ctx, cfg, sess, telemetry.CompactionTriggerTokenThreshold, "the previous compaction did not bring the prompt back under the threshold")
 		return nil, nil
 	}
 
@@ -92,12 +102,15 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		return nil, nil
 	}
 
-	if progress != nil {
-		progress.RecordAt(tokens)
-	}
 	summary, err := summarizeTraced(ctx, cfg, sess, telemetry.CompactionTriggerTokenThreshold, window)
 	if err != nil {
 		return nil, fmt.Errorf("tail-retention summarization failed: %w", err)
+	}
+	// Recorded only now. A failed attempt must leave the gate as it found it,
+	// or one transient summarizer error disarms compaction for the rest of the
+	// invocation and the prompt grows unchecked behind it.
+	if progress != nil && summary != nil {
+		progress.RecordAt(tokens)
 	}
 	return summary, nil
 }

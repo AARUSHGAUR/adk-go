@@ -44,8 +44,10 @@ type Runtime struct {
 	// sessionService persists the summary events the compactor produces.
 	sessionService session.Service
 
-	// lastCompactionTokens is the prompt size that triggered the most recent
-	// compaction in this invocation, or 0 if there has not been one.
+	// lastCompactionTokens is the prompt size of the most recent compaction in
+	// this invocation that has not yet been shown to work, or 0 when there is
+	// none outstanding. Only its zero-ness gates further compactions; the size
+	// itself is kept for diagnostics.
 	lastCompactionTokens atomic.Int64
 
 	// compacted records that a compaction already ran in this invocation. A
@@ -137,27 +139,47 @@ const runtimeCtxKey ctxKey = 0
 
 // AllowAt reports whether a compaction at this prompt size is worth attempting.
 //
-// It declines when the previous compaction in this invocation did not bring the
-// prompt below the size that triggered it. That is the case where compacting
-// cannot help: the retained tail alone already exceeds the threshold, so every
-// model call crosses it again and each one pays for a summarizer call that
-// changes nothing. Measured before this existed: six summarizer calls inside a
-// single seven-call invocation.
+// It declines while the previous compaction in this invocation has not yet been
+// shown to work. That is the case where compacting cannot help: the retained
+// tail alone already exceeds the threshold, so every model call crosses it
+// again and each one pays for a summarizer call that changes nothing. Measured
+// before this existed: six summarizer calls inside a single seven-call
+// invocation.
 //
-// A prompt that has actually shrunk, or grown past where it was, is allowed
-// through, so a long turn can still compact more than once when doing so helps.
-func (rt *Runtime) AllowAt(tokens int) bool {
+// "Shown to work" means the prompt later came back under the threshold, which
+// [Runtime.Recovered] reports. Comparing prompt sizes cannot distinguish the
+// two situations that leave a prompt larger than the last compaction: one that
+// freed nothing, and one that worked on a turn which has since grown. Refusing
+// both is what let a tool loop run to 45,056 tokens against a 2,000 threshold
+// after compaction had already shrunk it twice, which is worse than no gate.
+//
+// The size is accepted for symmetry with [Runtime.RecordAt] and for future use.
+func (rt *Runtime) AllowAt(int) bool {
 	if rt == nil {
 		return false
 	}
-	last := rt.lastCompactionTokens.Load()
-	return last == 0 || int64(tokens) < last
+	return rt.lastCompactionTokens.Load() == 0
 }
 
-// RecordAt notes the prompt size that triggered a compaction.
+// RecordAt notes that a compaction was performed at this prompt size.
+//
+// Call it once the summary is in hand, never before. Recording the attempt
+// instead let one transient summarizer failure disarm compaction for the rest
+// of the invocation with nothing stored in exchange.
 func (rt *Runtime) RecordAt(tokens int) {
 	if rt == nil {
 		return
 	}
-	rt.lastCompactionTokens.Store(int64(tokens))
+	// A compaction at a zero count would read as "nothing recorded yet", so the
+	// marker is kept non-zero. Only whether it is set is consulted.
+	rt.lastCompactionTokens.Store(max(int64(tokens), 1))
+}
+
+// Recovered notes that the prompt is back under the threshold, re-arming the
+// gate so a turn that grows again can compact again.
+func (rt *Runtime) Recovered() {
+	if rt == nil {
+		return
+	}
+	rt.lastCompactionTokens.Store(0)
 }

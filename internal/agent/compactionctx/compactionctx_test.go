@@ -71,3 +71,63 @@ func TestMarkCompactedIsSafeUnderConcurrency(t *testing.T) {
 		t.Error("AlreadyCompacted() = false after MarkCompacted()")
 	}
 }
+
+// TestProgressGateReArmsOnceThePromptRecovers pins that one compaction does not
+// disarm compaction for the rest of a long turn.
+//
+// The gate used to compare prompt sizes, refusing anything not smaller than the
+// size the last compaction ran at. A turn that kept growing therefore never
+// compacted again, however large it got, which is the opposite of what the gate
+// is for: a tool loop ran to 45,056 tokens against a 2,000 threshold after two
+// compactions had visibly worked.
+func TestProgressGateReArmsOnceThePromptRecovers(t *testing.T) {
+	t.Parallel()
+
+	rt := New(&compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2}, nil)
+
+	if !rt.AllowAt(2000) {
+		t.Fatal("AllowAt() = false before any compaction, want true")
+	}
+	rt.RecordAt(2000)
+
+	// Still above the threshold, so the compaction has not been shown to work
+	// and another one would summarize a little more to no effect.
+	if rt.AllowAt(2500) {
+		t.Error("AllowAt() = true straight after a compaction, want false")
+	}
+
+	// The prompt came back under the threshold, so the compaction did work.
+	rt.Recovered()
+	if !rt.AllowAt(2500) {
+		t.Error("AllowAt() = false after the prompt recovered, want true: a turn that grows again must be able to compact again")
+	}
+}
+
+// TestProgressGateStaysClosedWhileCompactionCannotHelp pins the case the gate
+// exists for: a retained tail that already exceeds the threshold, where the
+// prompt never recovers and every further compaction is a wasted model call.
+func TestProgressGateStaysClosedWhileCompactionCannotHelp(t *testing.T) {
+	t.Parallel()
+
+	rt := New(&compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2}, nil)
+	rt.RecordAt(5000)
+
+	for _, tokens := range []int{4900, 5200, 12000} {
+		if rt.AllowAt(tokens) {
+			t.Errorf("AllowAt(%d) = true, want false while the prompt has never come back under the threshold", tokens)
+		}
+	}
+}
+
+// TestProgressGateRecordAtKeepsAZeroCountDistinct pins that a compaction
+// recorded at a zero prompt size still closes the gate, rather than reading as
+// "nothing recorded yet".
+func TestProgressGateRecordAtKeepsAZeroCountDistinct(t *testing.T) {
+	t.Parallel()
+
+	rt := New(&compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2}, nil)
+	rt.RecordAt(0)
+	if rt.AllowAt(1) {
+		t.Error("AllowAt() = true after RecordAt(0), want false")
+	}
+}

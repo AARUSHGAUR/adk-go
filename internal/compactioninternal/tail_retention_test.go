@@ -599,3 +599,86 @@ func TestPromptTokenCountAddsEventsSinceTheLastReport(t *testing.T) {
 		t.Errorf("promptTokenCount() = %d, want more than the reported 100: the 400 characters appended since are not counted", got)
 	}
 }
+
+// recordingGate captures the [ProgressGate] calls TailRetention makes.
+type recordingGate struct {
+	allow     bool
+	recorded  []int
+	recovered int
+}
+
+func (g *recordingGate) AllowAt(int) bool { return g.allow }
+func (g *recordingGate) RecordAt(t int)   { g.recorded = append(g.recorded, t) }
+func (g *recordingGate) Recovered()       { g.recovered++ }
+
+// TestTailRetentionReArmsTheGateBelowTheThreshold pins that a prompt back under
+// the threshold re-arms the gate.
+//
+// Without this the gate closes on the first compaction of a turn and never
+// reopens, so a long turn that keeps growing never compacts again.
+func TestTailRetentionReArmsTheGateBelowTheThreshold(t *testing.T) {
+	t.Parallel()
+
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
+		textEvent("c", "inv2", 3, "q2"), withUsage(modelTextEvent("d", "inv2", 4, "a2"), 100),
+	}
+	gate := &recordingGate{allow: true}
+	cfg := &compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2, Summarizer: &fakeSummarizer{summary: "sum"}}
+
+	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil, gate)
+	if err != nil {
+		t.Fatalf("TailRetention() error = %v", err)
+	}
+	if got != nil {
+		t.Fatalf("TailRetention() returned a summary at 100 tokens against a 1000 threshold")
+	}
+	if gate.recovered != 1 {
+		t.Errorf("Recovered() called %d times, want 1: a prompt under the threshold means the last compaction worked", gate.recovered)
+	}
+}
+
+// TestTailRetentionDoesNotRecordAFailedAttempt pins that a summarizer failure
+// leaves the progress gate as it found it.
+//
+// Recording the attempt rather than the result let one transient error disarm
+// compaction for the whole invocation with nothing stored in exchange, and the
+// prompt then grew unchecked behind a gate that had stopped retrying.
+func TestTailRetentionDoesNotRecordAFailedAttempt(t *testing.T) {
+	t.Parallel()
+
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
+		textEvent("c", "inv2", 3, "q2"), withUsage(modelTextEvent("d", "inv2", 4, "a2"), 900),
+	}
+	gate := &recordingGate{allow: true}
+	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 2, Summarizer: &fakeSummarizer{err: errors.New("boom")}}
+
+	if _, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil, gate); err == nil {
+		t.Fatal("TailRetention() error = nil, want the summarizer failure")
+	}
+	if len(gate.recorded) != 0 {
+		t.Errorf("RecordAt called %v after a failed summarization, want no calls", gate.recorded)
+	}
+}
+
+// TestTailRetentionRecordsASuccessfulCompaction is the counterpart: a summary
+// that was produced must close the gate.
+func TestTailRetentionRecordsASuccessfulCompaction(t *testing.T) {
+	t.Parallel()
+
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
+		textEvent("c", "inv2", 3, "q2"), withUsage(modelTextEvent("d", "inv2", 4, "a2"), 900),
+	}
+	gate := &recordingGate{allow: true}
+	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 2, Summarizer: &fakeSummarizer{summary: "sum"}}
+
+	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil, gate)
+	if err != nil || got == nil {
+		t.Fatalf("TailRetention() = %v, %v, want a summary and no error", got, err)
+	}
+	if diff := cmp.Diff([]int{900}, gate.recorded); diff != "" {
+		t.Errorf("RecordAt calls mismatch (-want +got):\n%s", diff)
+	}
+}
