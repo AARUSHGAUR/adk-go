@@ -111,7 +111,7 @@ func drain(t *testing.T, stream iter.Seq2[*session.Event, error]) {
 func compactionEventsIn(sess session.Session) []*session.Event {
 	var out []*session.Event
 	for ev := range sess.Events().All() {
-		if compaction.IsCompactionEvent(ev) {
+		if compactioninternal.HasUsableSummary(ev) {
 			out = append(out, ev)
 		}
 	}
@@ -265,7 +265,7 @@ func TestRunnerCompactionSummaryIsNotYielded(t *testing.T) {
 	// The summary is bookkeeping for the next prompt, not part of the
 	// conversation, so callers must not observe it in the event stream.
 	for _, ev := range yielded {
-		if compaction.IsCompactionEvent(ev) {
+		if compactioninternal.HasUsableSummary(ev) {
 			t.Errorf("Run yielded a compaction event, want it persisted silently")
 		}
 	}
@@ -683,7 +683,7 @@ type appendFailingService struct {
 }
 
 func (s *appendFailingService) AppendEvent(ctx context.Context, sess session.Session, ev *session.Event) error {
-	if compaction.IsCompactionEvent(ev) {
+	if compactioninternal.HasUsableSummary(ev) {
 		return errors.New("storage is down")
 	}
 	return s.Service.AppendEvent(ctx, sess, ev)
@@ -833,7 +833,7 @@ func TestSummaryPassesThroughPlugins(t *testing.T) {
 	redactor, err := plugin.New(plugin.Config{
 		Name: "redactor",
 		OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
-			if !compaction.IsCompactionEvent(ev) {
+			if !compactioninternal.HasUsableSummary(ev) {
 				return nil, nil
 			}
 			mu.Lock()

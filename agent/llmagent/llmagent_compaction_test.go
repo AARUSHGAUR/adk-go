@@ -26,6 +26,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/compactioninternal"
 	"google.golang.org/adk/v2/internal/httprr"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/utils"
@@ -243,7 +244,7 @@ func TestCompactionE2E(t *testing.T) {
 	events := sessionEventsFor(t, r, sessionID)
 	summaries := make([]*session.Event, 0, 1)
 	for _, ev := range events {
-		if compaction.IsCompactionEvent(ev) {
+		if compactioninternal.HasUsableSummary(ev) {
 			summaries = append(summaries, ev)
 		}
 	}
@@ -332,7 +333,7 @@ func TestCompactionE2E(t *testing.T) {
 	// test for no reason on the next re-record.
 	outsideSummary := strings.ReplaceAll(final, strings.TrimSpace(summaryText), "")
 
-	// hasCompaction, not IsCompactionEvent: the latter answers "is there a
+	// hasCompaction, not HasUsableSummary: the latter answers "is there a
 	// usable summary here", which its own doc says is a different question from
 	// "is this bookkeeping". Filtering on it left the compacted tool traffic
 	// unexamined, which is exactly the pair the range is most likely to break.

@@ -371,7 +371,7 @@ func TestHasTailRetention(t *testing.T) {
 	}
 }
 
-func TestIsCompactionEvent(t *testing.T) {
+func TestHasUsableSummary(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -395,8 +395,8 @@ func TestIsCompactionEvent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := compaction.IsCompactionEvent(tc.event); got != tc.want {
-				t.Errorf("compaction.IsCompactionEvent() = %t, want %t", got, tc.want)
+			if got := HasUsableSummary(tc.event); got != tc.want {
+				t.Errorf("HasUsableSummary() = %t, want %t", got, tc.want)
 			}
 		})
 	}

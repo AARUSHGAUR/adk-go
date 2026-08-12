@@ -34,8 +34,8 @@ import (
 // template must contain. It is replaced with the rendered event transcript.
 const ConversationHistoryPlaceholder = "{conversation_history}"
 
-// DefaultPromptTemplate is the prompt [LLMSummarizer] uses when none is given.
-const DefaultPromptTemplate = "The following is a conversation history between a user and an AI agent." +
+// defaultPromptTemplate is the prompt [LLMSummarizer] uses when none is given.
+const defaultPromptTemplate = "The following is a conversation history between a user and an AI agent." +
 	" It may or may not start from a compacted history. Please identify and" +
 	" reiterate the user request, summarize the context so far, focusing on" +
 	" key decisions made and information obtained, as well as any unresolved" +
@@ -48,18 +48,18 @@ const DefaultPromptTemplate = "The following is a conversation history between a
 	"The rest of the summary should be concise and capture the" +
 	" essence of the interaction.\n\n" + ConversationHistoryPlaceholder
 
-// DefaultMaxToolContentChars caps how much of a single tool call's arguments or
+// defaultMaxToolContentChars caps how much of a single tool call's arguments or
 // response is rendered into the summarizer prompt.
-const DefaultMaxToolContentChars = 2000
+const defaultMaxToolContentChars = 2000
 
-// DefaultMaxTranscriptChars caps the whole rendered transcript handed to the
+// defaultMaxTranscriptChars caps the whole rendered transcript handed to the
 // summarizer.
 //
 // Summarization is the one call that sees the entire window at once, so it is
 // the call most likely to exceed the model's own context limit, and the least
 // visible when it does. The cap is generous: reaching it means the window is
 // too large rather than that any one part is.
-const DefaultMaxTranscriptChars = 200_000
+const defaultMaxTranscriptChars = 200_000
 
 // LLMSummarizerConfig configures [NewLLMSummarizer].
 type LLMSummarizerConfig struct {
@@ -67,14 +67,17 @@ type LLMSummarizerConfig struct {
 	Model model.LLM
 
 	// PromptTemplate is the instruction wrapped around the rendered
-	// conversation. It must contain [ConversationHistoryPlaceholder]. Defaults
-	// to [DefaultPromptTemplate].
+	// conversation. It must contain [ConversationHistoryPlaceholder]. Empty
+	// selects a built-in template.
+	//
+	// The built-in text is not published. It is the wording of one default,
+	// not a contract, and exporting it would make every later improvement to
+	// it a breaking change to this package.
 	PromptTemplate string
 
 	// MaxToolContentChars caps the rendered length of any single part of the
 	// transcript: a text part, a tool call's arguments, or a tool response.
-	// Defaults to [DefaultMaxToolContentChars]; a negative value disables
-	// truncation.
+	// Defaults to 2000; a negative value disables truncation.
 	//
 	// It applies to text as well as tool content deliberately. Text parts carry
 	// pasted documents and tool results re-emitted as text, so capping only tool
@@ -83,7 +86,7 @@ type LLMSummarizerConfig struct {
 	MaxToolContentChars int
 
 	// MaxTranscriptChars caps the whole rendered transcript. Defaults to
-	// [DefaultMaxTranscriptChars]; a negative value disables the cap.
+	// 200,000; a negative value disables the cap.
 	//
 	// Like MaxToolContentChars it counts characters rather than bytes, so a
 	// conversation in a non-Latin script costs what its length says it does.
@@ -143,18 +146,18 @@ func NewLLMSummarizer(cfg LLMSummarizerConfig) (*LLMSummarizer, error) {
 	}
 	template := cfg.PromptTemplate
 	if template == "" {
-		template = DefaultPromptTemplate
+		template = defaultPromptTemplate
 	}
 	if !strings.Contains(template, ConversationHistoryPlaceholder) {
 		return nil, fmt.Errorf("PromptTemplate must contain the placeholder %q", ConversationHistoryPlaceholder)
 	}
 	maxTranscript := cfg.MaxTranscriptChars
 	if maxTranscript == 0 {
-		maxTranscript = DefaultMaxTranscriptChars
+		maxTranscript = defaultMaxTranscriptChars
 	}
 	maxChars := cfg.MaxToolContentChars
 	if maxChars == 0 {
-		maxChars = DefaultMaxToolContentChars
+		maxChars = defaultMaxToolContentChars
 	}
 	return &LLMSummarizer{
 		model:               cfg.Model,

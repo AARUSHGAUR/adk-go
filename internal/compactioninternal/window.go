@@ -22,7 +22,6 @@ import (
 
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
-	"google.golang.org/adk/v2/session/compaction"
 )
 
 // longestSelfContainedPrefix returns the longest prefix of events that is safe
@@ -109,7 +108,7 @@ func trimToTimestampBoundary(events []*session.Event, length int) int {
 func LatestCompactionEvent(events []*session.Event) *session.Event {
 	var latest *session.Event
 	for i, ev := range events {
-		// hasCompaction, not IsCompactionEvent, deliberately. A record with no
+		// hasCompaction, not HasUsableSummary, deliberately. A record with no
 		// usable content still marks how far compaction reached, so the next
 		// window must start after it. Requiring content here would make the
 		// next window re-summarize everything the broken record covered.
@@ -131,13 +130,13 @@ func LatestCompactionEvent(events []*session.Event) *session.Event {
 // stream position: the earlier event is subsumed by the later one.
 func isCompactionSubsumed(i int, rng *session.EventCompaction, events []*session.Event) bool {
 	for j, other := range events {
-		// IsCompactionEvent rather than hasCompaction: only a record carrying
+		// HasUsableSummary rather than hasCompaction: only a record carrying
 		// usable content may evict another. Keying on the weaker predicate let
 		// a contentless record subsume a real summary, destroying one already
 		// paid for. Nothing then represented the range: the covered events fell
 		// back to raw and the boundary calculation went on pointing at the
 		// useless record.
-		if j == i || !compaction.IsCompactionEvent(other) {
+		if j == i || !HasUsableSummary(other) {
 			continue
 		}
 		o := other.Actions.Compaction
@@ -180,7 +179,7 @@ func selectSlidingWindow(events []*session.Event, interval, overlap int) []*sess
 	}
 
 	// Invocations in first-seen order, and whether each still holds anything no
-	// summary stands in for. hasCompaction rather than IsCompactionEvent: an
+	// summary stands in for. hasCompaction rather than HasUsableSummary: an
 	// event declaring a compaction is bookkeeping even when its content is
 	// unusable, and must never be counted as a conversational invocation.
 	//

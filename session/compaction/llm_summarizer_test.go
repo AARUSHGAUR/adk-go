@@ -173,7 +173,7 @@ func TestLLMSummarizerTruncatesLargeToolContent(t *testing.T) {
 func TestLLMSummarizerNegativeMaxDisablesTruncation(t *testing.T) {
 	t.Parallel()
 
-	big := strings.Repeat("x", DefaultMaxToolContentChars+10)
+	big := strings.Repeat("x", defaultMaxToolContentChars+10)
 	call := newEvent("c", "inv1", 1, "model", &genai.Part{
 		FunctionCall: &genai.FunctionCall{ID: "c1", Name: "search", Args: map[string]any{"q": big}},
 	})

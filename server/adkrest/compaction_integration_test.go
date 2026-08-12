@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/internal/compactioninternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/adkrest"
 	"google.golang.org/adk/v2/session"
@@ -192,7 +193,7 @@ func sessionEvents(t *testing.T, svc session.Service, sid string) []*session.Eve
 func countCompactions(events []*session.Event) int {
 	n := 0
 	for _, ev := range events {
-		if compaction.IsCompactionEvent(ev) {
+		if compactioninternal.HasUsableSummary(ev) {
 			n++
 		}
 	}

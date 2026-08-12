@@ -21,7 +21,6 @@ import (
 
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
-	"google.golang.org/adk/v2/session/compaction"
 )
 
 func TestApply(t *testing.T) {
@@ -277,8 +276,8 @@ func TestContentlessCompactionIsNeverConversation(t *testing.T) {
 		},
 	}
 
-	if compaction.IsCompactionEvent(contentless) {
-		t.Error("compaction.IsCompactionEvent() = true for a contentless compaction, want false (nothing to show a model)")
+	if HasUsableSummary(contentless) {
+		t.Error("HasUsableSummary() = true for a contentless compaction, want false (nothing to show a model)")
 	}
 	if !hasCompaction(contentless) {
 		t.Error("hasCompaction() = false for a contentless compaction, want true (it is still bookkeeping)")

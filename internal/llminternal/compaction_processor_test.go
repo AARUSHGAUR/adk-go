@@ -24,6 +24,7 @@ import (
 
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
+	"google.golang.org/adk/v2/internal/compactioninternal"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/utils"
@@ -116,7 +117,7 @@ func storedCompactions(t *testing.T, svc session.Service) []*session.Event {
 	}
 	var out []*session.Event
 	for ev := range resp.Session.Events().All() {
-		if compaction.IsCompactionEvent(ev) {
+		if compactioninternal.HasUsableSummary(ev) {
 			out = append(out, ev)
 		}
 	}

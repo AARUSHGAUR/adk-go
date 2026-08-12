@@ -202,16 +202,3 @@ type Summarizer interface {
 	// model call and got nothing usable back. It is nil when unknown.
 	SummarizeEvents(ctx context.Context, events []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error)
 }
-
-// IsCompactionEvent reports whether ev carries a context-compaction summary
-// that can actually be shown to a model: it declares a compaction, and that
-// compaction has content.
-//
-// Use it to count stored summaries, or to decide what to materialize into a
-// prompt. Note that it answers "is there a usable summary here", not "is this
-// event bookkeeping rather than conversation" — an event whose compaction has
-// no content is still bookkeeping, and this returns false for it. Only
-// [session.EventActions.Compaction] being non-nil answers the second question.
-func IsCompactionEvent(ev *session.Event) bool {
-	return ev != nil && ev.Actions.Compaction != nil && ev.Actions.Compaction.CompactedContent != nil
-}

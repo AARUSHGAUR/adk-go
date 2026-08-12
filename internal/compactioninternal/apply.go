@@ -21,7 +21,6 @@ import (
 
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
-	"google.golang.org/adk/v2/session/compaction"
 )
 
 // Apply rewrites an event list so compaction summaries stand in for the events
@@ -46,7 +45,7 @@ func Apply(events []*session.Event) []*session.Event {
 }
 
 // hasCompaction reports whether ev declares a compaction at all, usable or not.
-// Apply keys off this rather than [IsCompactionEvent] so that a malformed
+// Apply keys off this rather than [HasUsableSummary] so that a malformed
 // compaction is still stripped from the prompt instead of leaking through as a
 // contentless raw event.
 func hasCompaction(ev *session.Event) bool {
@@ -66,7 +65,7 @@ type keptRange struct {
 func substituteSummaries(events []*session.Event) []*session.Event {
 	var kept []keptRange
 	for i, ev := range events {
-		if !compaction.IsCompactionEvent(ev) {
+		if !HasUsableSummary(ev) {
 			continue
 		}
 		if ev.Actions.Compaction.EndTimestamp.Before(ev.Actions.Compaction.StartTimestamp) {
@@ -355,6 +354,19 @@ func overlaps(a, b *session.EventCompaction) bool {
 		return false
 	}
 	return !a.StartTimestamp.After(b.EndTimestamp) && !b.StartTimestamp.After(a.EndTimestamp)
+}
+
+// HasUsableSummary reports whether ev carries a compaction summary that can
+// actually be shown to a model: it declares a compaction, and that compaction
+// has content.
+//
+// Distinct from hasCompaction, which asks whether the event is bookkeeping at
+// all. An event declaring a compaction with no content is still bookkeeping and
+// must never be treated as conversation, but it has no summary to materialize.
+// Conflating the two let a contentless record evict a real summary and, worse,
+// authorise deleting the events it claimed to cover.
+func HasUsableSummary(ev *session.Event) bool {
+	return ev != nil && ev.Actions.Compaction != nil && ev.Actions.Compaction.CompactedContent != nil
 }
 
 // ReloadSession re-reads s from svc and returns the stored session.

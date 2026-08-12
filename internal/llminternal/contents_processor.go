@@ -30,7 +30,6 @@ import (
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
-	"google.golang.org/adk/v2/session/compaction"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -100,7 +99,7 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 		// below expands them into content.
 		if (content == nil || content.Role == "" || len(content.Parts) == 0) &&
 			ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil &&
-			!compaction.IsCompactionEvent(ev) {
+			!compactioninternal.HasUsableSummary(ev) {
 			// TODO: log a bad event with content but no Role is skipped
 			// Note: python checks here if content.Parts[0] is an empty string and skip if so.
 			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
@@ -121,7 +120,7 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 		if shouldExcludeEvent(ev) {
 			continue
 		}
-		if isOtherAgentReply(agentName, ev) && !compaction.IsCompactionEvent(ev) {
+		if isOtherAgentReply(agentName, ev) && !compactioninternal.HasUsableSummary(ev) {
 			filtered = append(filtered, ConvertForeignEvent(ev))
 		} else {
 			filtered = append(filtered, ev)
