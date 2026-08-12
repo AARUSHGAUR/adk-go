@@ -139,7 +139,7 @@ func TestSelectTailRetentionWindow(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := ids(selectTailRetentionWindow(tc.events, tc.retention))
+			got := ids(selectTailRetentionWindow(tc.events, tc.retention, ""))
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("selectTailRetentionWindow(retention=%d) mismatch (-want +got):\n%s", tc.retention, diff)
 			}
@@ -160,7 +160,7 @@ func TestSelectTailRetentionWindowSeedsPreviousSummary(t *testing.T) {
 		textEvent("e", "inv3", 6, "q3"), modelTextEvent("f", "inv3", 7, "a3"),
 	}
 
-	window := selectTailRetentionWindow(events, 2)
+	window := selectTailRetentionWindow(events, 2, "")
 	if len(window) == 0 {
 		t.Fatal("selectTailRetentionWindow() returned nothing")
 	}
@@ -383,7 +383,7 @@ func TestTailRetention(t *testing.T) {
 				cfg = &copied
 			}
 
-			got, err := TailRetention(context.Background(), cfg, &staticSession{events: tc.events}, nil, nil)
+			got, err := TailRetention(context.Background(), cfg, &staticSession{events: tc.events}, "", nil, nil)
 			if gotErr := err != nil; gotErr != tc.wantErr {
 				t.Fatalf("TailRetention() error = %v, wantErr %t", err, tc.wantErr)
 			}
@@ -412,7 +412,7 @@ func TestTailRetentionUsesTheEstimator(t *testing.T) {
 	summarizer := &fakeSummarizer{summary: "sum"}
 	cfg := &compaction.Config{TokenThreshold: 500, EventRetentionSize: 2, Summarizer: summarizer}
 
-	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events},
+	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "",
 		func([]*session.Event) int { return 100 }, nil)
 	if err != nil {
 		t.Fatalf("TailRetention() error = %v", err)
@@ -421,7 +421,7 @@ func TestTailRetentionUsesTheEstimator(t *testing.T) {
 		t.Error("TailRetention() compacted despite an estimate below the threshold")
 	}
 
-	got, err = TailRetention(context.Background(), cfg, &staticSession{events: events},
+	got, err = TailRetention(context.Background(), cfg, &staticSession{events: events}, "",
 		func([]*session.Event) int { return 700 }, nil)
 	if err != nil {
 		t.Fatalf("TailRetention() error = %v", err)
@@ -435,7 +435,7 @@ func TestTailRetentionRequiresSummarizer(t *testing.T) {
 	t.Parallel()
 
 	_, err := TailRetention(context.Background(), &compaction.Config{TokenThreshold: 1, EventRetentionSize: 0},
-		&staticSession{events: []*session.Event{withUsage(modelTextEvent("a", "inv1", 1, "a"), 10)}}, nil, nil)
+		&staticSession{events: []*session.Event{withUsage(modelTextEvent("a", "inv1", 1, "a"), 10)}}, "", nil, nil)
 	if err == nil {
 		t.Fatal("TailRetention() with no Summarizer returned nil error, want an error")
 	}
@@ -450,7 +450,7 @@ func TestTailRetentionStampsTheSummary(t *testing.T) {
 	}
 	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 0, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil, nil)
+	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "", nil, nil)
 	if err != nil {
 		t.Fatalf("TailRetention() error = %v", err)
 	}
@@ -485,7 +485,7 @@ func TestTailRetentionThenApplyShrinksHistory(t *testing.T) {
 	}
 	cfg := &compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2, Summarizer: &fakeSummarizer{summary: "SUMMARY"}}
 
-	summary, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil, nil)
+	summary, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "", nil, nil)
 	if err != nil {
 		t.Fatalf("TailRetention() error = %v", err)
 	}
@@ -523,7 +523,7 @@ func TestSelectTailRetentionWindowStaysInOneScope(t *testing.T) {
 
 	events := []*session.Event{root1, root2, sub, tail1, tail2}
 
-	window := selectTailRetentionWindow(events, 2)
+	window := selectTailRetentionWindow(events, 2, "")
 	if diff := cmp.Diff([]string{"a", "b"}, ids(window)); diff != "" {
 		t.Errorf("selectTailRetentionWindow() mismatch (-want +got):\n%s\nthe window must stop at the scope change", diff)
 	}
@@ -558,7 +558,7 @@ func TestSelectTailRetentionWindowKeepsATiedBoundaryEvent(t *testing.T) {
 		textEvent("e", "inv4", 6, "q4"),
 	}
 
-	window := selectTailRetentionWindow(events, 1)
+	window := selectTailRetentionWindow(events, 1, "")
 	if !slices.Contains(ids(window), "tied") {
 		t.Errorf("window %v does not include the boundary event, so it is covered by the next range without being summarized", ids(window))
 	}
@@ -626,7 +626,7 @@ func TestTailRetentionReArmsTheGateBelowTheThreshold(t *testing.T) {
 	gate := &recordingGate{allow: true}
 	cfg := &compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil, gate)
+	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "", nil, gate)
 	if err != nil {
 		t.Fatalf("TailRetention() error = %v", err)
 	}
@@ -654,7 +654,7 @@ func TestTailRetentionDoesNotRecordAFailedAttempt(t *testing.T) {
 	gate := &recordingGate{allow: true}
 	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 2, Summarizer: &fakeSummarizer{err: errors.New("boom")}}
 
-	if _, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil, gate); err == nil {
+	if _, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "", nil, gate); err == nil {
 		t.Fatal("TailRetention() error = nil, want the summarizer failure")
 	}
 	if len(gate.recorded) != 0 {
@@ -674,11 +674,47 @@ func TestTailRetentionRecordsASuccessfulCompaction(t *testing.T) {
 	gate := &recordingGate{allow: true}
 	cfg := &compaction.Config{TokenThreshold: 100, EventRetentionSize: 2, Summarizer: &fakeSummarizer{summary: "sum"}}
 
-	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, nil, gate)
+	got, err := TailRetention(context.Background(), cfg, &staticSession{events: events}, "", nil, gate)
 	if err != nil || got == nil {
 		t.Fatalf("TailRetention() = %v, %v, want a summary and no error", got, err)
 	}
 	if diff := cmp.Diff([]int{900}, gate.recorded); diff != "" {
 		t.Errorf("RecordAt calls mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestSelectTailRetentionWindowKeepsTheLiveQuestion pins that the turn being
+// answered keeps its own question.
+//
+// EventRetentionSize counts events and a turn is not a fixed number of them, so
+// at every size Validate accepts the question can scroll out of the retained
+// tail and be summarized into a paraphrase of the instruction being carried
+// out. It is held back separately.
+//
+// The traffic after it stays eligible, which is the point: excluding the whole
+// live invocation would stop a long tool loop compacting itself, and that is
+// the case this strategy exists for.
+func TestSelectTailRetentionWindowKeepsTheLiveQuestion(t *testing.T) {
+	t.Parallel()
+
+	events := []*session.Event{
+		textEvent("q1", "inv1", 1, "older question"),
+		modelTextEvent("a1", "inv1", 2, "older answer"),
+		// The turn in flight: its question, then a long tool loop.
+		textEvent("q2", "inv2", 3, "the question being answered"),
+		modelTextEvent("t1", "inv2", 4, "tool step 1"),
+		modelTextEvent("t2", "inv2", 5, "tool step 2"),
+		modelTextEvent("t3", "inv2", 6, "tool step 3"),
+	}
+
+	got := ids(selectTailRetentionWindow(events, 2, "inv2"))
+
+	if slices.Contains(got, "q2") {
+		t.Error("the window covers the question the turn is answering")
+	}
+	// The loop's own older traffic is still compactable, skipping over the
+	// question, which only a covered set can express.
+	if diff := cmp.Diff([]string{"q1", "a1", "t1"}, got); diff != "" {
+		t.Errorf("window mismatch (-want +got):\n%s", diff)
 	}
 }

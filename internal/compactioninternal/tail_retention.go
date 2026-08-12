@@ -57,7 +57,7 @@ type ProgressGate interface {
 // which is what lets it react to a single long turn rather than waiting for the
 // turn to end. Callers must run it before assembling contents so the fresh
 // summary is reflected in the request.
-func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Session, estimate TokenCounter, progress ProgressGate) (*session.Event, error) {
+func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Session, liveInvocationID string, estimate TokenCounter, progress ProgressGate) (*session.Event, error) {
 	if !HasTailRetention(cfg) {
 		return nil, nil
 	}
@@ -91,7 +91,7 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		return nil, nil
 	}
 
-	window := selectTailRetentionWindow(events, cfg.EventRetentionSize)
+	window := selectTailRetentionWindow(events, cfg.EventRetentionSize, liveInvocationID)
 	if len(window) == 0 {
 		// The threshold is crossed and nothing can be summarized: the retained
 		// tail is the whole history, or the window has no self-contained prefix
@@ -204,7 +204,7 @@ func EstimateTokensFromContents(contents []*genai.Content) int {
 // When an earlier compaction exists its summary is prepended to the window, so
 // the new summary covers and supersedes it. That keeps history as one rolling
 // summary plus a raw tail, rather than an ever-growing chain of summaries.
-func selectTailRetentionWindow(events []*session.Event, retentionSize int) []*session.Event {
+func selectTailRetentionWindow(events []*session.Event, retentionSize int, liveInvocationID string) []*session.Event {
 	if retentionSize < 0 {
 		return nil
 	}
@@ -230,9 +230,34 @@ func selectTailRetentionWindow(events []*session.Event, retentionSize int) []*se
 			}
 		}
 	}
+	// The turn being answered opens with the user's own question, and
+	// summarizing that is summarizing the instruction currently being carried
+	// out. EventRetentionSize cannot protect it, because it counts events and a
+	// turn is not a fixed number of them: one tool round costs two, so at every
+	// retention size Validate accepts the question can scroll out of the tail.
+	// Measured at retention 1 and 2, three of five second-turn prompts lost it.
+	//
+	// Only that one event is held back, not the whole invocation. Excluding the
+	// live turn entirely would stop a long tool loop compacting its own
+	// traffic, which is the case this strategy exists for. Everything after the
+	// question stays eligible, and a covered set can describe a window with a
+	// hole in it where an interval could not.
+	liveHead := ""
+	if liveInvocationID != "" {
+		for _, ev := range events {
+			if ev != nil && ev.InvocationID == liveInvocationID && !hasCompaction(ev) {
+				liveHead = ev.ID
+				break
+			}
+		}
+	}
+
 	var candidates []*session.Event
 	for _, ev := range events[start:] {
 		if hasCompaction(ev) {
+			continue
+		}
+		if liveHead != "" && ev.ID == liveHead {
 			continue
 		}
 		candidates = append(candidates, ev)

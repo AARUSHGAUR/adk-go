@@ -986,9 +986,12 @@ func TestRunnerTailRetentionCompactsMidInvocation(t *testing.T) {
 	// fires as soon as there are more events than the retained tail.
 	m := &usageModel{promptTokens: 5000}
 	summarizer := &recordingSummarizer{summary: "TAIL-SUMMARY"}
+	// Retention 1, because the question that opens the turn being answered is
+	// held back on top of the retained tail rather than counting towards it.
+	// At retention 2 the three events of this fixture are all spoken for.
 	r, svc := newCompactionRunner(t, m, &compaction.Config{
 		TokenThreshold:     1000,
-		EventRetentionSize: 2,
+		EventRetentionSize: 1,
 		Summarizer:         summarizer,
 	})
 
