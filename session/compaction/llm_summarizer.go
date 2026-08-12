@@ -85,6 +85,9 @@ type LLMSummarizerConfig struct {
 	// MaxTranscriptChars caps the whole rendered transcript. Defaults to
 	// [DefaultMaxTranscriptChars]; a negative value disables the cap.
 	//
+	// Like MaxToolContentChars it counts characters rather than bytes, so a
+	// conversation in a non-Latin script costs what its length says it does.
+	//
 	// Exceeding it is reported as an error rather than fixed by dropping the
 	// oldest turns. Those turns are inside the range the compaction would record
 	// as covered, so dropping them from the transcript while still deleting them
@@ -401,6 +404,14 @@ func mimeOr(mimeType, fallback string) string {
 	return mimeType + " attachment"
 }
 
+// truncationSuffixBudget is the room renderTranscript reserves per part for the
+// suffix truncateTo appends when it cuts one.
+//
+// A generous fixed figure rather than an exact one: the suffix carries a count
+// whose width varies, and reserving a little too much only means shrinking
+// slightly harder than strictly required.
+const truncationSuffixBudget = 32
+
 // renderTranscript renders events, keeping the result within the configured
 // transcript budget.
 //
@@ -412,22 +423,31 @@ func mimeOr(mimeType, fallback string) string {
 // from history would lose them with nothing standing in their place.
 func (s *LLMSummarizer) renderTranscript(events []*session.Event) (string, error) {
 	transcript := s.formatEvents(events, s.maxToolContentChars)
-	if s.maxTranscriptChars < 0 || len(transcript) <= s.maxTranscriptChars {
+	size := utf8.RuneCountInString(transcript)
+	if s.maxTranscriptChars < 0 || size <= s.maxTranscriptChars {
 		return transcript, nil
 	}
 
 	// Second pass with a per-part cap derived from the budget, so a few large
 	// parts are shrunk rather than the whole window being refused.
+	//
+	// The cap leaves room for the suffix truncateTo appends, because a part
+	// only slightly over the cap comes back longer than it went in. Without
+	// that room a window of many small parts grows under the pass that exists
+	// to shrink it, and is then refused with a size larger than the transcript
+	// this function had already rendered.
 	if parts := countRenderedParts(events); parts > 0 {
-		if cap := s.maxTranscriptChars / parts; cap > 0 && cap < s.maxToolContentChars {
-			transcript = s.formatEvents(events, cap)
+		if cap := s.maxTranscriptChars/parts - truncationSuffixBudget; cap > 0 && cap < s.maxToolContentChars {
+			if shrunk := s.formatEvents(events, cap); utf8.RuneCountInString(shrunk) < size {
+				transcript, size = shrunk, utf8.RuneCountInString(shrunk)
+			}
 		}
 	}
-	if len(transcript) <= s.maxTranscriptChars {
+	if size <= s.maxTranscriptChars {
 		return transcript, nil
 	}
 	return "", fmt.Errorf("rendered transcript is %d characters, over the %d limit, for a window of %d events: compact a smaller window",
-		len(transcript), s.maxTranscriptChars, len(events))
+		size, s.maxTranscriptChars, len(events))
 }
 
 // countRenderedParts counts the parts formatEvents would render a line for.

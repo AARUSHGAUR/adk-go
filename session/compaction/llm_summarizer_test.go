@@ -669,3 +669,77 @@ func TestSummarizeEventsHonoursTimeout(t *testing.T) {
 		t.Fatal("SummarizeEvents() did not return; the timeout is not applied")
 	}
 }
+
+// TestLLMSummarizerTranscriptBudgetCountsRunes pins that MaxTranscriptChars is
+// measured in the same unit as MaxToolContentChars and as its own name.
+//
+// The two were measured differently: parts were capped in runes while the
+// budget compared len(transcript) in bytes. Any conversation in a non-Latin
+// script then blew a budget it was nowhere near, and no amount of per-part
+// truncation could bring it down, so the session stopped compacting for good.
+func TestLLMSummarizerTranscriptBudgetCountsRunes(t *testing.T) {
+	t.Parallel()
+
+	// 1000 runes of Japanese is 3000 bytes. A 2000 unit budget fits it
+	// comfortably in runes and cannot fit it at all in bytes.
+	var events []*session.Event
+	for i := range 10 {
+		events = append(events, textEvent(fmt.Sprintf("e%d", i), "inv1", i, strings.Repeat("検索結果", 25)))
+	}
+
+	s, err := NewLLMSummarizer(LLMSummarizerConfig{
+		Model: &fakeModel{}, MaxTranscriptChars: 2000,
+	})
+	if err != nil {
+		t.Fatalf("NewLLMSummarizer() error = %v", err)
+	}
+
+	transcript, err := s.renderTranscript(events)
+	if err != nil {
+		t.Fatalf("renderTranscript() error = %v, want nil: the window is %d runes against a %d budget",
+			err, utf8.RuneCountInString(transcript), s.maxTranscriptChars)
+	}
+	if got := utf8.RuneCountInString(transcript); got > s.maxTranscriptChars {
+		t.Errorf("transcript is %d runes, over the %d budget", got, s.maxTranscriptChars)
+	}
+}
+
+// TestLLMSummarizerShrinkPassNeverEnlarges pins that the second rendering pass
+// cannot produce a bigger transcript than the one it was called to shrink.
+//
+// Each truncated part gains a "... [truncated N chars]" suffix, so a window of
+// many parts only slightly over the derived cap paid the suffix more often than
+// it saved content. The window was then refused with an inflated size, naming a
+// figure larger than the transcript that had actually been rendered.
+func TestLLMSummarizerShrinkPassNeverEnlarges(t *testing.T) {
+	t.Parallel()
+
+	// Twenty parts a little over the cap the budget derives, which is where the
+	// suffix costs more than the truncation saves.
+	var events []*session.Event
+	for i := range 20 {
+		events = append(events, textEvent(fmt.Sprintf("e%d", i), "inv1", i, strings.Repeat("x", 30)))
+	}
+
+	s, err := NewLLMSummarizer(LLMSummarizerConfig{
+		Model: &fakeModel{}, MaxTranscriptChars: 400,
+	})
+	if err != nil {
+		t.Fatalf("NewLLMSummarizer() error = %v", err)
+	}
+
+	full := utf8.RuneCountInString(s.formatEvents(events, s.maxToolContentChars))
+	if _, err = s.renderTranscript(events); err == nil {
+		t.Fatalf("renderTranscript() error = nil, want one: %d runes cannot fit a %d budget", full, s.maxTranscriptChars)
+	}
+
+	// The reported size is the transcript the shrink pass produced. It must not
+	// exceed the one it started from.
+	var reported int
+	if _, scanErr := fmt.Sscanf(err.Error(), "rendered transcript is %d characters", &reported); scanErr != nil {
+		t.Fatalf("cannot read the reported size out of %q: %v", err, scanErr)
+	}
+	if reported > full {
+		t.Errorf("shrink pass grew the transcript from %d to %d runes", full, reported)
+	}
+}
