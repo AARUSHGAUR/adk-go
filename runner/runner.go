@@ -146,6 +146,11 @@ func New(cfg Config) (*Runner, error) {
 // Resolving at construction time means a misconfigured runner fails fast at
 // New, rather than silently skipping compaction turns later, or blowing up
 // mid-conversation the first time a compaction triggers.
+// defaultSummarizerTimeout bounds the summarization call the runner installs
+// when an application enables compaction without naming a Summarizer. A var so
+// a test can shorten it rather than waiting a minute to prove the bound exists.
+var defaultSummarizerTimeout = 60 * time.Second
+
 func resolveCompactionConfig(cfg *compaction.Config, rootAgent agent.Agent) (*compaction.Config, error) {
 	if cfg == nil {
 		return nil, nil
@@ -173,6 +178,13 @@ func resolveCompactionConfig(cfg *compaction.Config, rootAgent agent.Agent) (*co
 		// the summarization call too, rather than it silently falling back to
 		// provider defaults for the one call that sees the whole transcript.
 		GenerateContentConfig: llminternal.Reveal(llmAgent).GenerateContentConfig,
+		// A bound on the one call the application did not ask for. Compaction
+		// runs inside the run loop, and the post-invocation pass runs from a
+		// defer, so a provider that never answers holds the turn open with
+		// nothing to show for it. Compaction is an optimisation, so giving up
+		// on it is the cheap outcome. An application that wants a different
+		// bound supplies its own Summarizer.
+		Timeout: defaultSummarizerTimeout,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create the default compaction summarizer: %w", err)

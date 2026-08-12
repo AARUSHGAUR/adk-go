@@ -735,3 +735,94 @@ func TestLLMSummarizerShrinkPassNeverEnlarges(t *testing.T) {
 		t.Errorf("shrink pass grew the transcript from %d to %d runes", full, reported)
 	}
 }
+
+// TestLLMSummarizerRefusesATruncatedSummary pins that a generation cut short is
+// reported as a failure rather than stored.
+//
+// The finish reason was read into a variable and then only consulted when the
+// response carried no content at all. A MAX_TOKENS stop that still carried text
+// was stored as the summary, so the covered turns were deleted from every later
+// prompt and replaced by a sentence that stops partway.
+func TestLLMSummarizerRefusesATruncatedSummary(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		reason  genai.FinishReason
+		wantErr bool
+	}{
+		{name: "a complete generation is stored", reason: genai.FinishReasonStop},
+		{name: "no reason reported is stored", reason: ""},
+		{name: "truncated", reason: genai.FinishReasonMaxTokens, wantErr: true},
+		{name: "blocked for safety", reason: genai.FinishReasonSafety, wantErr: true},
+		{name: "recitation", reason: genai.FinishReasonRecitation, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			resp := summaryResponse("a summary cut off part")
+			resp.FinishReason = tc.reason
+			s, err := NewLLMSummarizer(LLMSummarizerConfig{
+				Model: &fakeModel{responses: []*model.LLMResponse{resp}},
+			})
+			if err != nil {
+				t.Fatalf("NewLLMSummarizer() error = %v", err)
+			}
+
+			got, _, err := s.SummarizeEvents(t.Context(),
+				[]*session.Event{textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1")})
+			if gotErr := err != nil; gotErr != tc.wantErr {
+				t.Fatalf("SummarizeEvents() error = %v, wantErr %t", err, tc.wantErr)
+			}
+			if tc.wantErr && got != nil {
+				t.Error("a refused summary must not also be returned")
+			}
+		})
+	}
+}
+
+// TestSummarizerGenConfigCarriesOnlyWhatItMeans pins that an application's
+// generation config does not drag response-shaping settings into a call whose
+// job is to return prose.
+//
+// The adaptation was a deny-list of three fields, so everything not thought of
+// rode along: a JSON response MIME type, a response schema, image modalities, a
+// cached-content handle from the agent's own conversation, and a thinking
+// config.
+func TestSummarizerGenConfigCarriesOnlyWhatItMeans(t *testing.T) {
+	t.Parallel()
+
+	temp := float32(0.2)
+	got := summarizerGenConfig(&genai.GenerateContentConfig{
+		Temperature:        &temp,
+		SafetySettings:     []*genai.SafetySetting{{Category: genai.HarmCategoryHateSpeech}},
+		SystemInstruction:  genai.NewContentFromText("you are a pirate", "user"),
+		Tools:              []*genai.Tool{{}},
+		ResponseMIMEType:   "application/json",
+		ResponseSchema:     &genai.Schema{Type: genai.TypeObject},
+		ResponseModalities: []string{"IMAGE"},
+		CachedContent:      "cached-conversation-handle",
+		ThinkingConfig:     &genai.ThinkingConfig{IncludeThoughts: true},
+	})
+
+	if got.Temperature == nil || *got.Temperature != temp {
+		t.Error("Temperature did not carry over")
+	}
+	if len(got.SafetySettings) != 1 {
+		t.Error("SafetySettings did not carry over")
+	}
+	for name, carried := range map[string]bool{
+		"SystemInstruction":  got.SystemInstruction != nil,
+		"Tools":              got.Tools != nil,
+		"ResponseMIMEType":   got.ResponseMIMEType != "",
+		"ResponseSchema":     got.ResponseSchema != nil,
+		"ResponseModalities": got.ResponseModalities != nil,
+		"CachedContent":      got.CachedContent != "",
+		"ThinkingConfig":     got.ThinkingConfig != nil,
+	} {
+		if carried {
+			t.Errorf("%s reached the summarization call, which asks only for prose", name)
+		}
+	}
+}

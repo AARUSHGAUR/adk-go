@@ -25,30 +25,24 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
-// newSummaryEvent builds the event a [Summarizer] returns from the summary it
-// produced. Implementations should call it rather than assembling the event
-// themselves: it derives the range the summary covers, applies the authorship
-// a stored summary needs, and refuses input that would produce a broken
-// compaction.
+// newSummaryEvent builds the event that carries a summary: it names the events
+// the summary replaces, derives the bounding box over them, and applies the
+// authorship a stored summary needs.
 //
-// The returned event carries no ID, invocation ID or timestamp. The framework
-// assigns those when it appends the event, and deliberately gives the summary
-// a fresh invocation ID rather than one belonging to a covered turn, because
-// sliding-window selection counts invocations. That is why this takes no
-// context.Context where [session.NewEvent] does.
+// The returned event carries no ID, invocation ID or timestamp. Those are
+// assigned when it is appended, and the invocation ID is deliberately fresh
+// rather than one belonging to a covered turn, because sliding-window selection
+// counts invocations.
 //
-// Only prose parts of summary survive into the stored event. A summary is
-// prose by definition, and anything else reaches a later prompt as if the
-// framework had produced it, so a function call a summarizer invented or was
-// tricked into emitting cannot ride along.
+// Only prose parts of summary survive into the stored event. Whatever a
+// summarizer returns is replayed into later prompts as though the framework had
+// produced it, so a function call it invented or was tricked into emitting
+// cannot ride along, and a thought is not something the model chose to say.
 //
-// events must be non-empty, hold no nil element and be in chronological
-// order, and summary must be non-nil and hold prose. usage may be nil. An
-// error is returned rather than a silently broken event, because a range that
-// covers nothing leaves the compacted turns in every future prompt while
-// still consuming a summary. [session.EventCompaction] is a plain struct with
-// no constructor to validate in, so the checks live here, at the supported
-// way to build one.
+// events must be non-empty and hold no nil element, and summary must be
+// non-nil and hold prose. usage may be nil. Bad input is an error rather than
+// a silently broken event, because a compaction that stands for nothing still
+// costs a model call and still leaves the prompt as large as it was.
 func newSummaryEvent(events []*session.Event, summary *genai.Content, usage *genai.GenerateContentResponseUsageMetadata) (*session.Event, error) {
 	if len(events) == 0 {
 		return nil, fmt.Errorf("cannot summarize an empty event list")
@@ -68,23 +62,28 @@ func newSummaryEvent(events []*session.Event, summary *genai.Content, usage *gen
 			return nil, fmt.Errorf("events[%d] is nil", i)
 		}
 	}
-	// Chronology is checked across the whole window, not just its ends.
+	// The bounding box over the window, taken as a true minimum and maximum
+	// rather than as its first and last element.
 	//
-	// The range is the closed interval between the first and last event, and
-	// prompt assembly deletes everything inside it. Checking only the endpoints
-	// let an interior event sit past the last one: it was summarized, fell
-	// outside the recorded range, and so survived in the prompt as well, so the
-	// model saw that turn twice.
+	// A stored event list is in append order, and a timestamp is stamped when
+	// an event is created, so two invocations in flight on one session leave
+	// the list non-monotonic with a single clock and no skew. Requiring the
+	// window to be sorted rejected exactly those sessions, and because nothing
+	// was then recorded the same window was re-selected and re-rejected on
+	// every later turn: two overlapping invocations were enough to stop a
+	// session compacting for good.
 	//
-	// Widening the range to cover the true span would be the wrong repair. A
-	// window is a contiguous slice of the session, and stretching its range
-	// past its own endpoints could swallow an event that is not in the window
-	// and was never summarized, turning a duplicate into a deletion.
-	start, end := events[0].Timestamp, events[len(events)-1].Timestamp
-	for i := 1; i < len(events); i++ {
-		if events[i].Timestamp.Before(events[i-1].Timestamp) {
-			return nil, fmt.Errorf("events are not in chronological order: events[%d] is at %v, before events[%d] at %v",
-				i, events[i].Timestamp, i-1, events[i-1].Timestamp)
+	// Widening the box to the true span is safe now that the covered set names
+	// its events. It could not be done while coverage was the interval itself,
+	// because stretching the interval past the window's own endpoints would
+	// swallow events that were never summarized.
+	start, end := events[0].Timestamp, events[0].Timestamp
+	for _, ev := range events[1:] {
+		if ev.Timestamp.Before(start) {
+			start = ev.Timestamp
+		}
+		if ev.Timestamp.After(end) {
+			end = ev.Timestamp
 		}
 	}
 

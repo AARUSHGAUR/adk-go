@@ -77,12 +77,11 @@ func TestNewSummaryEventRejectsBadInput(t *testing.T) {
 		{name: "no events", events: nil, summary: content, wantErr: true},
 		{name: "nil summary", events: ordered, summary: nil, wantErr: true},
 		{
-			// An inverted range covers nothing, so the compacted turns would
-			// stay in every future prompt while a summary was still paid for.
+			// Not an error any more: the box is a true minimum and maximum, and
+			// the covered set names the events regardless of their order.
 			name:    "events out of chronological order",
 			events:  []*session.Event{modelTextEvent("b", "inv1", 4, "a1"), textEvent("a", "inv1", 1, "q1")},
 			summary: content,
-			wantErr: true,
 		},
 	}
 
@@ -170,23 +169,37 @@ func TestCompactionEventIsNotAFinalResponse(t *testing.T) {
 	}
 }
 
-// TestNewSummaryEventRejectsInteriorDisorder checks that a window whose ends
-// are ordered but whose middle is not is refused.
+// TestNewSummaryEventBoundsAnOutOfOrderWindow checks that a window whose
+// timestamps are not sorted is summarized rather than refused.
 //
-// The range is the interval between the first and last event, and prompt
-// assembly deletes everything inside it. An interior event stamped past the
-// last one is summarized, falls outside that interval, and so also survives in
-// the prompt, which shows the model the same turn twice.
-func TestNewSummaryEventRejectsInteriorDisorder(t *testing.T) {
+// A stored event list is in append order while timestamps are stamped at
+// creation, so two invocations in flight on one session leave it non-monotonic
+// with one clock and no skew. Refusing those windows stopped the session
+// compacting for good: nothing was recorded, so the same window was re-selected
+// and re-refused on every later turn.
+//
+// The recorded box has to be a true minimum and maximum, or it would not bound
+// the events the summary names.
+func TestNewSummaryEventBoundsAnOutOfOrderWindow(t *testing.T) {
 	t.Parallel()
 
 	events := []*session.Event{
-		{Timestamp: time.Unix(1, 0)},
-		{Timestamp: time.Unix(9, 0)}, // past the last one
-		{Timestamp: time.Unix(5, 0)},
+		{ID: "a", Timestamp: time.Unix(1, 0)},
+		{ID: "b", Timestamp: time.Unix(9, 0)}, // past the last one
+		{ID: "c", Timestamp: time.Unix(5, 0)},
 	}
-	if _, err := newSummaryEvent(events, genai.NewContentFromText("s", "model"), nil); err == nil {
-		t.Error("newSummaryEvent() accepted a window with an out-of-order middle")
+
+	got, err := newSummaryEvent(events, genai.NewContentFromText("s", "model"), nil)
+	if err != nil {
+		t.Fatalf("newSummaryEvent() error = %v", err)
+	}
+	c := got.Actions.Compaction
+	if !c.StartTimestamp.Equal(time.Unix(1, 0)) || !c.EndTimestamp.Equal(time.Unix(9, 0)) {
+		t.Errorf("range = [%v, %v], want the true bounds [%v, %v]",
+			c.StartTimestamp, c.EndTimestamp, time.Unix(1, 0), time.Unix(9, 0))
+	}
+	if diff := cmp.Diff([]string{"a", "b", "c"}, c.CoveredEventIDs); diff != "" {
+		t.Errorf("covered IDs mismatch (-want +got):\n%s", diff)
 	}
 }
 

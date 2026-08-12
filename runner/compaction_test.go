@@ -1327,3 +1327,77 @@ func TestTailRetentionStopsWhenItIsNotHelping(t *testing.T) {
 		t.Fatalf("the model only ran %d times, so the tool loop did not happen and this proved nothing", m.calls)
 	}
 }
+
+// TestRunnerDefaultSummarizerIsBounded pins that the summarizer the runner
+// installs cannot hold a turn open indefinitely.
+//
+// Compaction runs inside the run loop, and the post-invocation pass runs from a
+// defer, so a provider that never answers parks the turn behind it. The
+// Timeout field's own documentation says it is worth setting, and the one
+// summarizer an application did not configure was the one without it.
+func TestRunnerDefaultSummarizerIsBounded(t *testing.T) {
+	const userID, sessionID = "u", "s"
+
+	defaultSummarizerTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { defaultSummarizerTimeout = 60 * time.Second })
+
+	// The second call this model receives is the summarization, and it never
+	// answers it.
+	m := &hangingSummarizerModel{release: make(chan struct{})}
+	t.Cleanup(func() { close(m.release) })
+
+	// No Summarizer, so the runner installs its own over the agent's model.
+	r, svc := newCompactionRunner(t, m, &compaction.Config{CompactionInterval: 1})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, err := range r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}) {
+			// The compaction failure is the point: it is reported rather than
+			// hanging. Anything else would be a real failure.
+			if err != nil && !errors.Is(err, compaction.ErrCompaction) {
+				t.Errorf("run failed: %v", err)
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the turn never finished: the default summarizer has no timeout and the model never answered")
+	}
+
+	if got := len(compactionEventsIn(getSession(t, svc, userID, sessionID))); got != 0 {
+		t.Errorf("stored %d compaction events, want 0: the summarization timed out", got)
+	}
+}
+
+// hangingSummarizerModel answers the agent's own call and then blocks forever,
+// which is what a provider that stops responding looks like to the summarizer.
+type hangingSummarizerModel struct {
+	mu      sync.Mutex
+	calls   int
+	release chan struct{}
+}
+
+func (m *hangingSummarizerModel) Name() string { return "hanging" }
+
+func (m *hangingSummarizerModel) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	m.mu.Lock()
+	m.calls++
+	first := m.calls == 1
+	m.mu.Unlock()
+
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if first {
+			yield(&model.LLMResponse{Content: genai.NewContentFromText("answer", "model")}, nil)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			yield(nil, ctx.Err())
+		case <-m.release:
+			yield(nil, errors.New("released"))
+		}
+	}
+}

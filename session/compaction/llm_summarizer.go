@@ -218,6 +218,14 @@ func (s *LLMSummarizer) SummarizeEvents(ctx context.Context, events []*session.E
 		if !hasText(resp.Content) {
 			continue
 		}
+		// A generation that stopped for any reason other than reaching the end
+		// is not a summary, even when it carries text. MAX_TOKENS is the one
+		// that matters: the text is a summary cut off partway, and storing it
+		// deletes the covered turns and replaces them with a fragment. Safety,
+		// recitation and blocklist stops arrive the same way.
+		if finishReason != "" && finishReason != genai.FinishReasonStop {
+			return nil, resp.UsageMetadata, fmt.Errorf("summarizer stopped before finishing (finish reason %q), so the summary is incomplete", finishReason)
+		}
 		return resp.Content, resp.UsageMetadata, nil
 	}
 
@@ -360,20 +368,33 @@ func escapeLines(text string) string {
 // summarizerGenConfig adapts an application's generation config for the
 // summarization call.
 //
-// Safety settings and output limits carry over, because an application that
-// tightened them meant them to apply to every call the framework makes on its
-// behalf. The system instruction and tools do not: the summarizer supplies its
-// own instruction, and offering it tools would invite a summary containing a
-// function call that nothing is waiting for.
+// Only settings that mean the same thing for a summarization are carried over,
+// named one by one. A deny-list was the wrong shape here: everything not
+// thought of rode along, so an application asking for JSON out, or for a fixed
+// response schema, or for images, silently applied all of it to a call whose
+// entire job is to return prose. A cached-content handle from the agent's own
+// call came through as well, which is a different conversation entirely.
+//
+// Safety settings carry over because an application that tightened them meant
+// them to apply to every call the framework makes on its behalf. Temperature
+// and the sampling controls carry over as the closest thing to "how this
+// application likes its model to behave".
 func summarizerGenConfig(cfg *genai.GenerateContentConfig) *genai.GenerateContentConfig {
 	if cfg == nil {
 		return nil
 	}
-	out := *cfg
-	out.SystemInstruction = nil
-	out.Tools = nil
-	out.ToolConfig = nil
-	return &out
+	return &genai.GenerateContentConfig{
+		SafetySettings:  cfg.SafetySettings,
+		Temperature:     cfg.Temperature,
+		TopP:            cfg.TopP,
+		TopK:            cfg.TopK,
+		StopSequences:   cfg.StopSequences,
+		CandidateCount:  cfg.CandidateCount,
+		Seed:            cfg.Seed,
+		HTTPOptions:     cfg.HTTPOptions,
+		Labels:          cfg.Labels,
+		MaxOutputTokens: cfg.MaxOutputTokens,
+	}
 }
 
 // placeholderKind names the payload of a part the transcript cannot render
