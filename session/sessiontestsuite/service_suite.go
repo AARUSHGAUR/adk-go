@@ -511,6 +511,55 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			}
 		})
 
+		t.Run("a_missing_event_id_is_assigned", func(t *testing.T) {
+			// An event built as a struct literal by an agent or a tool never
+			// passes through session.NewEvent, so it arrives with no ID. Two
+			// such events are indistinguishable to anything that identifies
+			// events by ID, and a stored event that cannot be named cannot be
+			// referred to by a compaction record either.
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+
+			for range 2 {
+				event := &session.Event{Author: "user", InvocationID: "inv1"}
+				if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+					t.Fatalf("AppendEvent() error = %v", err)
+				}
+				if event.ID == "" {
+					t.Error("AppendEvent left the event without an ID")
+				}
+			}
+
+			got, err := s.Get(ctx, &session.GetRequest{
+				AppName:   testAppName,
+				UserID:    "user1",
+				SessionID: created.Session.ID(),
+			})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			snap := Snapshot(got.Session)
+			if len(snap.Events) != 2 {
+				t.Fatalf("stored %d events, want 2", len(snap.Events))
+			}
+			seen := map[string]bool{}
+			for i, ev := range snap.Events {
+				if ev.ID == "" {
+					t.Errorf("stored event %d has no ID", i)
+					continue
+				}
+				if seen[ev.ID] {
+					t.Errorf("stored event %d reuses ID %q", i, ev.ID)
+				}
+				seen[ev.ID] = true
+			}
+		})
+
 		t.Run("partial_events_are_not_persisted", func(t *testing.T) {
 			s := setup(t)
 			ctx := t.Context()

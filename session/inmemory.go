@@ -204,6 +204,14 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	if event.Partial {
 		return nil
 	}
+	// Give the event an identity if it arrived without one, the same way a
+	// missing session ID is filled in on Create. [NewEvent] assigns one, but an
+	// event built as a struct literal by an agent or a tool never goes through
+	// it, and anything that identifies events by ID cannot tell two ID-less
+	// events apart.
+	if event.ID == "" {
+		event.ID = platform.NewUUID(ctx)
+	}
 
 	sess, ok := curSession.(*session)
 	if !ok {
