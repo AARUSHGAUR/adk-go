@@ -676,3 +676,57 @@ func TestSelectSlidingWindowRetryDoesNotGrow(t *testing.T) {
 		t.Errorf("retry window mismatch (-first +retry):\n%s", diff)
 	}
 }
+
+// TestSlidingWindowMakesProgressAcrossABranchChange pins that a branch change
+// inside an invocation does not stall compaction.
+//
+// The window is trimmed to one branch and one isolation scope, so when the
+// branch changes inside an invocation the cut stops short of that invocation's
+// last event. Progress was then measured against the newest compaction's end
+// timestamp, and the slice was taken from the invocation's first event however
+// much of it was already summarized, so every later turn recomputed a
+// byte-identical window and paid for a model call that changed nothing.
+// Forking a child branch inside one invocation is the ordinary multi-agent
+// shape, so this was not an edge case.
+func TestSlidingWindowMakesProgressAcrossABranchChange(t *testing.T) {
+	t.Parallel()
+
+	branched := func(id, inv string, ts int, branch, text string) *session.Event {
+		ev := textEvent(id, inv, ts, text)
+		ev.Branch = branch
+		return ev
+	}
+	all := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"),
+		modelTextEvent("b", "inv1", 2, "a1"),
+		// The branch forks partway through inv2, so the cut lands inside it.
+		textEvent("c", "inv2", 3, "q2"),
+		branched("d", "inv2", 4, "child", "sub-agent work"),
+		branched("e", "inv2", 5, "child", "more sub-agent work"),
+	}
+
+	var chosen [][]string
+	for pass := 1; pass <= 4; pass++ {
+		w := selectSlidingWindow(all, 1, 0)
+		if len(w) == 0 {
+			break
+		}
+		chosen = append(chosen, ids(w))
+
+		summary, err := newSummaryEvent(w, genai.NewContentFromText("summary", "model"), nil)
+		if err != nil {
+			t.Fatalf("pass %d: newSummaryEvent() error = %v", pass, err)
+		}
+		summary.ID = fmt.Sprintf("s%d", pass)
+		summary.InvocationID = fmt.Sprintf("e-compaction-%d", pass)
+		summary.Timestamp = at(10 + pass)
+		all = append(all, summary)
+	}
+
+	// Every pass moves on, and the session runs out of things to summarize
+	// rather than re-offering the same slice for ever.
+	want := [][]string{{"a", "b"}, {"c"}, {"d", "e"}}
+	if diff := cmp.Diff(want, chosen); diff != "" {
+		t.Errorf("windows chosen across passes mismatch (-want +got):\n%s", diff)
+	}
+}

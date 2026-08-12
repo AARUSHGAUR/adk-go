@@ -178,8 +178,20 @@ func TestCompactionE2E(t *testing.T) {
 	// compaction of a session starts at the first invocation whatever the
 	// overlap is. Exercising the seam needs a second window, so it belongs in
 	// the offline tests where windows are cheap.
+	// An explicit summarizer with no timeout, because a deadline on the
+	// summarization call travels to the wire as an X-Server-Timeout header and
+	// so becomes part of what the recording has to match. The runner installs
+	// one with a timeout by default, which is right in production and would
+	// make every cassette holding a summarizer call depend on that number.
+	summarizer, err := compaction.NewLLMSummarizer(compaction.LLMSummarizerConfig{
+		Model: newGeminiModel(t, compactionModelName, nil),
+	})
+	if err != nil {
+		t.Fatalf("NewLLMSummarizer() error = %v", err)
+	}
 	r := testutil.NewTestAgentRunnerWithCompaction(t, a, &compaction.Config{
 		CompactionInterval: 2,
+		Summarizer:         summarizer,
 	})
 
 	const sessionID = "compaction_session"

@@ -17,7 +17,6 @@ package compactioninternal
 import (
 	"fmt"
 	"slices"
-	"time"
 
 	"google.golang.org/genai"
 
@@ -180,21 +179,20 @@ func selectSlidingWindow(events []*session.Event, interval, overlap int) []*sess
 		return nil
 	}
 
-	// The boundary of the newest compaction already recorded. Everything at or
-	// before it has been summarized once already.
-	var lastCompactEnd time.Time
-	for _, ev := range events {
-		if hasCompaction(ev) {
-			if end := ev.Actions.Compaction.EndTimestamp; end.After(lastCompactEnd) {
-				lastCompactEnd = end
-			}
-		}
-	}
-
-	// Invocations in first-seen order, and whether each has any event past the
-	// boundary. hasCompaction rather than IsCompactionEvent: an event declaring
-	// a compaction is bookkeeping even when its content is unusable, and must
-	// never be counted as a conversational invocation.
+	// Invocations in first-seen order, and whether each still holds anything no
+	// summary stands in for. hasCompaction rather than IsCompactionEvent: an
+	// event declaring a compaction is bookkeeping even when its content is
+	// unusable, and must never be counted as a conversational invocation.
+	//
+	// Asking what is covered, rather than comparing against the newest
+	// compaction's end timestamp, is what stops a stall. A window is trimmed to
+	// one branch and one isolation scope, and when the branch changes inside an
+	// invocation the recorded end stops short of that invocation's last event.
+	// Every later turn then saw the same invocation as new, recomputed a
+	// byte-identical window, and paid for a model call that changed nothing.
+	// Forking a child branch inside one invocation is the ordinary multi-agent
+	// shape, so this was not an edge case. Coverage moves forward on each pass
+	// even when the cut does not reach the end of a turn.
 	var order []string
 	isNew := make(map[string]bool)
 	for _, ev := range events {
@@ -205,7 +203,7 @@ func selectSlidingWindow(events []*session.Event, interval, overlap int) []*sess
 			order = append(order, ev.InvocationID)
 			isNew[ev.InvocationID] = false
 		}
-		if ev.Timestamp.After(lastCompactEnd) {
+		if !coveredByAny(ev, events) {
 			isNew[ev.InvocationID] = true
 		}
 	}
@@ -238,12 +236,31 @@ func selectSlidingWindow(events []*session.Event, interval, overlap int) []*sess
 	startID := order[max(0, firstNew-overlap)]
 	endID := order[min(len(order)-1, firstNew+interval-1)]
 
-	// Slice from the first event of startID through the last of endID. Events
-	// in between are included whatever they are, including ones with no
-	// invocation ID, which is exactly the contiguity the range model needs.
+	// Where each invocation sits in the sequence, so an already-summarized
+	// event can be told apart from one deliberately pulled back by overlap.
+	// Overlap re-summarizes whole earlier invocations on purpose, and those all
+	// sit before firstNew.
+	position := make(map[string]int, len(order))
+	for i, id := range order {
+		position[id] = i
+	}
+	staleAt := func(ev *session.Event) bool {
+		return position[ev.InvocationID] >= firstNew && coveredByAny(ev, events)
+	}
+
+	// Slice from the first uncovered event of startID through the last of
+	// endID. Events in between are included whatever they are, including ones
+	// with no invocation ID.
+	//
+	// Skipping what is already summarized within the new invocations is the
+	// other half of the stall: an invocation left partly compacted by a scope
+	// cut would be re-sliced from the same place on the next pass, the same cut
+	// would fall in the same spot, and the window would never move. Events an
+	// overlap deliberately pulls back are not skipped, since re-summarizing
+	// them is the whole point of overlap.
 	first, last := -1, -1
 	for i, ev := range events {
-		if hasCompaction(ev) {
+		if hasCompaction(ev) || staleAt(ev) {
 			continue
 		}
 		if first < 0 && ev.InvocationID == startID {
@@ -259,11 +276,12 @@ func selectSlidingWindow(events []*session.Event, interval, overlap int) []*sess
 
 	window := make([]*session.Event, 0, last-first+1)
 	for _, ev := range events[first : last+1] {
-		// Prior summaries are bookkeeping, not conversation, and are the only
-		// thing dropped from the slice. They are never re-summarized, so a
-		// sliding-window compaction is a constant-factor reduction rather than
-		// a bound; the tail-retention strategy is what bounds prompt growth.
-		if hasCompaction(ev) {
+		// Prior summaries are bookkeeping rather than conversation, and an
+		// event a summary already stands in for is not re-summarized unless
+		// overlap asked for it. Summaries themselves are never re-summarized,
+		// so a sliding-window compaction is a constant-factor reduction rather
+		// than a bound; tail retention is what bounds prompt growth.
+		if hasCompaction(ev) || staleAt(ev) {
 			continue
 		}
 		window = append(window, ev)
@@ -347,4 +365,17 @@ func coversAllOf(a, b *session.EventCompaction) bool {
 		return true
 	}
 	return !a.StartTimestamp.After(b.StartTimestamp) && !a.EndTimestamp.Before(b.EndTimestamp)
+}
+
+// coveredByAny reports whether any compaction in events stands in for ev.
+func coveredByAny(ev *session.Event, events []*session.Event) bool {
+	for _, other := range events {
+		if !hasCompaction(other) {
+			continue
+		}
+		if inRange(ev, other.Actions.Compaction) {
+			return true
+		}
+	}
+	return false
 }
