@@ -293,6 +293,24 @@ type EventCompaction struct {
 	// CompactedContent is the content that replaces the covered events in the
 	// prompt.
 	CompactedContent *genai.Content `json:"compactedContent"`
+
+	// CoveredEventIDs are the IDs of the events this summary replaces. It is
+	// the authoritative answer to what a compaction covers; the timestamp range
+	// above is a bounding box over it and a cheap way to rule an event out.
+	//
+	// The range alone could not say it. Choosing a window filters events out of
+	// the middle of a span, by branch, by isolation scope and by what the
+	// retained tail holds back, so an interval covering the ends also covers
+	// the gaps. An event in a gap was deleted from every later prompt having
+	// been summarized by nothing, and its content was simply lost. A set has no
+	// gaps, and it can describe a window with a hole in it, which an interval
+	// cannot.
+	//
+	// An event whose ID is absent is not covered, even when its timestamp falls
+	// inside the range. That direction is deliberate: failing to cover one
+	// leaves it raw in the prompt beside a summary of it, which is visible and
+	// recoverable, where over-covering deletes it silently.
+	CoveredEventIDs []string `json:"coveredEventIds,omitempty"`
 }
 
 // clone returns a deep copy, or nil for a nil receiver.
@@ -307,6 +325,7 @@ func (c *EventCompaction) clone() *EventCompaction {
 		return nil
 	}
 	out := *c
+	out.CoveredEventIDs = slices.Clone(c.CoveredEventIDs)
 	if c.CompactedContent != nil {
 		content := *c.CompactedContent
 		content.Parts = slices.Clone(c.CompactedContent.Parts)

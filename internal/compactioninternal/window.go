@@ -16,6 +16,7 @@ package compactioninternal
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"google.golang.org/genai"
@@ -127,7 +128,7 @@ func LatestCompactionEvent(events []*session.Event) *session.Event {
 }
 
 // isCompactionSubsumed reports whether the compaction at index i is fully
-// contained by another compaction in events. Identical ranges are broken by
+// covered by another compaction in events. Identical coverage is broken by
 // stream position: the earlier event is subsumed by the later one.
 func isCompactionSubsumed(i int, rng *session.EventCompaction, events []*session.Event) bool {
 	for j, other := range events {
@@ -141,10 +142,15 @@ func isCompactionSubsumed(i int, rng *session.EventCompaction, events []*session
 			continue
 		}
 		o := other.Actions.Compaction
-		if o.StartTimestamp.After(rng.StartTimestamp) || o.EndTimestamp.Before(rng.EndTimestamp) {
+		// Subsuming means standing in for everything the other one stood in
+		// for. Discarding a record whose events the survivor does not cover
+		// would leave those events represented by nothing at all, which is the
+		// failure this whole model exists to remove.
+		if !coversAllOf(o, rng) {
 			continue
 		}
-		if o.StartTimestamp.Before(rng.StartTimestamp) || o.EndTimestamp.After(rng.EndTimestamp) || j > i {
+		if o.StartTimestamp.Before(rng.StartTimestamp) || o.EndTimestamp.After(rng.EndTimestamp) ||
+			len(o.CoveredEventIDs) > len(rng.CoveredEventIDs) || j > i {
 			return true
 		}
 	}
@@ -321,4 +327,24 @@ func skipBlockedHead(window []*session.Event) []*session.Event {
 		}
 	}
 	return nil
+}
+
+// coversAllOf reports whether a stands in for every event b does.
+//
+// The ID sets answer it exactly. When either record carries none, which only a
+// hand-built one does, containment of the timestamp ranges is the best
+// available answer.
+func coversAllOf(a, b *session.EventCompaction) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	if len(a.CoveredEventIDs) > 0 && len(b.CoveredEventIDs) > 0 {
+		for _, id := range b.CoveredEventIDs {
+			if !slices.Contains(a.CoveredEventIDs, id) {
+				return false
+			}
+		}
+		return true
+	}
+	return !a.StartTimestamp.After(b.StartTimestamp) && !a.EndTimestamp.Before(b.EndTimestamp)
 }

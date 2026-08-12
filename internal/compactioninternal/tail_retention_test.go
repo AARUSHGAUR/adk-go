@@ -130,9 +130,9 @@ func TestSelectTailRetentionWindow(t *testing.T) {
 				textEvent("e", "inv3", 6, "q3"), modelTextEvent("f", "inv3", 7, "a3"),
 			},
 			retention: 2,
-			// The prior summary is seeded in as "rolling-summary" (a synthetic event with no
-			// ID) so the new compaction supersedes it.
-			want: []string{"rolling-summary", "c", "d"},
+			// The prior summary is seeded in under its own ID, so the new
+			// compaction inherits what it covered and supersedes it.
+			want: []string{"s1", "c", "d"},
 		},
 	}
 
@@ -155,7 +155,7 @@ func TestSelectTailRetentionWindowSeedsPreviousSummary(t *testing.T) {
 
 	events := []*session.Event{
 		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
-		compactionEvent("s1", 3, 1, 2, "earlier summary"),
+		compactionEvent("s1", 3, 1, 2, "earlier summary", "a", "b"),
 		textEvent("c", "inv2", 4, "q2"), modelTextEvent("d", "inv2", 5, "a2"),
 		textEvent("e", "inv3", 6, "q3"), modelTextEvent("f", "inv3", 7, "a3"),
 	}

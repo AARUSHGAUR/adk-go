@@ -283,12 +283,17 @@ func selectTailRetentionWindow(events []*session.Event, retentionSize int) []*se
 		// it the seed is indistinguishable from an ordinary model turn, so the
 		// transcript renders a summary as if the agent had said it, and nothing
 		// downstream can tell how many times content has been re-summarized.
-		ID:             "rolling-summary",
+		// The previous summary's own identity, so the compaction built on top
+		// of it inherits everything it stood for and supersedes it cleanly.
+		// A synthetic ID here would leave the old record covering events the
+		// new one does not, and both would materialize into the same prompt.
+		ID:             latest.ID,
 		Author:         "model",
 		Timestamp:      prev.StartTimestamp,
 		Branch:         latest.Branch,
 		IsolationScope: latest.IsolationScope,
 		LLMResponse:    model.LLMResponse{Content: prev.CompactedContent},
+		Actions:        session.EventActions{Compaction: prev},
 	}
 	if seed.Branch != window[0].Branch || seed.IsolationScope != window[0].IsolationScope {
 		// The rolling summary belongs to a different scope than the window that

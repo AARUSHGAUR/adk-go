@@ -107,7 +107,7 @@ func confirmationEvent(id, invocationID string, ts int, callID string) *session.
 
 // compactionEvent builds a stored compaction event: it sits at timestamp ts in
 // the stream and covers the inclusive range [start, end].
-func compactionEvent(id string, ts, start, end int, summary string) *session.Event {
+func compactionEvent(id string, ts, start, end int, summary string, coveredIDs ...string) *session.Event {
 	return &session.Event{
 		ID:           id,
 		InvocationID: "compaction-" + id,
@@ -118,6 +118,7 @@ func compactionEvent(id string, ts, start, end int, summary string) *session.Eve
 				StartTimestamp:   at(start),
 				EndTimestamp:     at(end),
 				CompactedContent: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: summary}}},
+				CoveredEventIDs:  coveredIDs,
 			},
 		},
 	}

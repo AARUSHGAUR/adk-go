@@ -479,3 +479,56 @@ func TestApplyToleratesNilEvents(t *testing.T) {
 		t.Errorf("Apply() mismatch (-want +got):\n%s", diff)
 	}
 }
+
+// TestApplyKeepsAnEventTheSummaryDidNotCover is the property the covered-ID set
+// exists for.
+//
+// Choosing a window filters events out of the middle of its own span, by
+// branch, by isolation scope and by what the retained tail holds back. A
+// timestamp range covering the ends therefore covers those gaps too, and an
+// event in a gap was dropped from every later prompt having been summarized by
+// nothing. Its content was simply lost, with no summary standing in for it.
+func TestApplyKeepsAnEventTheSummaryDidNotCover(t *testing.T) {
+	t.Parallel()
+
+	// The summary spans a..d but stands in only for a and d. Whatever kept b
+	// and c out of the window, they were handed to no summarizer.
+	summary := compactionEvent("s1", 9, 1, 4, "summary of a and d", "a", "d")
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"),
+		textEvent("b", "inv1", 2, "sibling branch"),
+		textEvent("c", "inv1", 3, "retained tail"),
+		modelTextEvent("d", "inv1", 4, "a1"),
+		summary,
+	}
+
+	got := ids(Apply(events))
+	if diff := cmp.Diff([]string{"s1", "b", "c"}, got); diff != "" {
+		t.Errorf("prompt events mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestApplyKeepsAnEventTiedToTheWindowHead pins the boundary case that a
+// timestamp range cannot express.
+//
+// With events x@1, a@1 and b@3 and a window of [a b], the recorded range is
+// [1..3] and x sits inside it while having been summarized by nothing. Ties are
+// not hypothetical: the SQL backend truncates timestamps to microseconds, and
+// the platform time provider makes replay deterministic.
+func TestApplyKeepsAnEventTiedToTheWindowHead(t *testing.T) {
+	t.Parallel()
+
+	events := []*session.Event{
+		textEvent("x", "inv1", 1, "tied to the head, never summarized"),
+		textEvent("a", "inv1", 1, "q1"),
+		modelTextEvent("b", "inv1", 3, "a1"),
+		compactionEvent("s1", 9, 1, 3, "summary of a and b", "a", "b"),
+	}
+
+	// x keeps its place ahead of the summary, which is emitted where the first
+	// event it does cover used to sit.
+	got := ids(Apply(events))
+	if diff := cmp.Diff([]string{"x", "s1"}, got); diff != "" {
+		t.Errorf("prompt events mismatch (-want +got):\n%s", diff)
+	}
+}

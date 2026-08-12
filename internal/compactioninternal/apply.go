@@ -162,14 +162,14 @@ func isCovered(i int, ev *session.Event, kept []keptRange) bool {
 	return false
 }
 
-// coveredBy reports whether the raw event at index i falls inside k's range.
+// coveredBy reports whether the raw event at index i is covered by k.
 // Only a compaction appearing later in the stream can cover an event: a summary
 // never covers events recorded after it was written.
 func coveredBy(i int, ev *session.Event, k keptRange) bool {
 	if i >= k.index {
 		return false
 	}
-	return !ev.Timestamp.Before(k.rng.StartTimestamp) && !ev.Timestamp.After(k.rng.EndTimestamp)
+	return inRange(ev, k.rng)
 }
 
 // recoverCompactedFunctionCalls re-injects function-call events that compaction
@@ -293,17 +293,20 @@ func recoverCompactedFunctionCalls(events, sourceEvents []*session.Event) []*ses
 // RangeRaced reports whether the session gained an event inside summary's range
 // while the summary was being produced.
 //
-// A summary records the span it covers as an inclusive timestamp range, and
-// prompt assembly drops everything inside that range. Summarizing takes a model
-// call, so a concurrent invocation on the same session can append inside the
-// chosen span while it is in flight. Recording the summary anyway would drop
-// those turns from every later prompt without ever having summarized them.
+// Only a competing compaction counts. A summary names the events it replaces,
+// so an ordinary turn appended by a concurrent invocation while summarizing was
+// in flight is simply not covered: it stays raw in the prompt, which is the
+// right outcome and needs no summary thrown away. That also closes the window
+// between this check and the append, which no check could have covered.
+//
+// A second compaction is different. Two summaries whose ID sets overlap would
+// each stand in for the same turns, so the same content would be materialized
+// twice into one prompt.
 //
 // selectedFrom is the session state the window was chosen from, and latest is a
-// fresh read taken after summarizing. An event inside the range that is present
-// in latest but absent from selectedFrom arrived too late to be summarized.
-// Comparing the two states makes this exact rather than a guess about
-// timestamps.
+// fresh read taken after summarizing. A compaction present in latest but absent
+// from selectedFrom arrived while this one was being produced. Comparing the
+// two states makes this exact rather than a guess about timestamps.
 //
 // Callers discard the summary when this returns true.
 func RangeRaced(latest, selectedFrom session.Session, summary *session.Event) bool {
@@ -318,26 +321,40 @@ func RangeRaced(latest, selectedFrom session.Session, summary *session.Event) bo
 	}
 
 	for _, ev := range collect(latest) {
-		if hasCompaction(ev) {
-			// A compaction event counts only if it is new. One that was already
-			// present when the window was selected is the boundary this summary
-			// was built from, not a racer. A new one inside the range means
-			// another invocation summarized part of the same span while this
-			// summary was being produced, so recording both would cover the
-			// same turns twice.
-			if _, seen := known[ev.ID]; !seen && inRange(ev, rng) {
-				return true
-			}
+		if !hasCompaction(ev) {
 			continue
 		}
-		if ev.Timestamp.Before(rng.StartTimestamp) || ev.Timestamp.After(rng.EndTimestamp) {
+		// A compaction counts only if it is new. One already present when the
+		// window was selected is the boundary this summary was built from,
+		// rather than a racer.
+		if _, seen := known[ev.ID]; seen {
 			continue
 		}
-		if _, seen := known[ev.ID]; !seen {
+		if overlaps(rng, ev.Actions.Compaction) {
 			return true
 		}
 	}
 	return false
+}
+
+// overlaps reports whether two compactions stand in for any of the same events.
+//
+// Their ID sets answer it exactly. Falling back to comparing spans covers a
+// record built by hand with no IDs, where any intersection of the two intervals
+// has to be treated as an overlap.
+func overlaps(a, b *session.EventCompaction) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	if len(a.CoveredEventIDs) > 0 && len(b.CoveredEventIDs) > 0 {
+		for _, id := range b.CoveredEventIDs {
+			if slices.Contains(a.CoveredEventIDs, id) {
+				return true
+			}
+		}
+		return false
+	}
+	return !a.StartTimestamp.After(b.EndTimestamp) && !b.StartTimestamp.After(a.EndTimestamp)
 }
 
 // ReloadSession re-reads s from svc and returns the stored session.
@@ -403,7 +420,32 @@ func UnwrapSession(s session.Session) session.Session {
 	}
 }
 
-// inRange reports whether ev falls inside rng.
+// inRange reports whether rng covers ev.
+//
+// This is the only place that answers the question. Compaction has already
+// grown three predicates for "is this a compaction", the weakest of which
+// authorised deletion, and coverage is the one where a disagreement deletes
+// conversation, so it gets exactly one definition.
+//
+// The timestamp range is a bounding box and rules an event out cheaply. The ID
+// set decides, and an event the set does not name is not covered whatever its
+// timestamp says: choosing a window filters events out of the middle of its own
+// span, so an interval that covers the ends covers the gaps too.
+//
+// A record with no ID set at all falls back to the range. Nothing writes one
+// today, since newSummaryEvent always lists what it covered, but the field is
+// on an exported struct that a caller can build by hand, and treating an empty
+// list as "covers nothing" would make such a record delete its covered events
+// from the prompt while substituting a summary for none of them.
 func inRange(ev *session.Event, rng *session.EventCompaction) bool {
-	return !ev.Timestamp.Before(rng.StartTimestamp) && !ev.Timestamp.After(rng.EndTimestamp)
+	if ev == nil || rng == nil {
+		return false
+	}
+	if ev.Timestamp.Before(rng.StartTimestamp) || ev.Timestamp.After(rng.EndTimestamp) {
+		return false
+	}
+	if len(rng.CoveredEventIDs) == 0 {
+		return true
+	}
+	return slices.Contains(rng.CoveredEventIDs, ev.ID)
 }

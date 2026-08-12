@@ -16,6 +16,7 @@ package compactioninternal
 
 import (
 	"fmt"
+	"slices"
 
 	"google.golang.org/genai"
 
@@ -116,6 +117,30 @@ func newSummaryEvent(events []*session.Event, summary *genai.Content, usage *gen
 	// filters exist to enforce.
 	branch, scope := events[0].Branch, events[0].IsolationScope
 
+	// The events this summary stands in for, named rather than described by
+	// their span. Everything the window filtered out keeps its place in the
+	// prompt, whatever its timestamp says.
+	//
+	// An event with no ID is left out. It cannot be named, so it cannot be
+	// covered, and leaving it raw beside a summary of it is the recoverable
+	// half of that choice. AppendEvent assigns an ID to anything that arrives
+	// without one, so a stored event reaching here should always have one.
+	covered := make([]string, 0, len(events))
+	for _, ev := range events {
+		if ev.ID != "" {
+			covered = append(covered, ev.ID)
+		}
+		// A summary in the window is a rolling seed: this compaction restates
+		// it, so it stands in for what that one stood in for as well.
+		// Otherwise the older record would keep covering events this one does
+		// not, and both would be materialized into the same prompt.
+		if c := ev.Actions.Compaction; c != nil {
+			covered = append(covered, c.CoveredEventIDs...)
+		}
+	}
+	slices.Sort(covered)
+	covered = slices.Compact(covered)
+
 	return &session.Event{
 		// Authored as "user" because a summary is injected context rather than
 		// something the agent said. It is re-authored as "model" when
@@ -128,6 +153,7 @@ func newSummaryEvent(events []*session.Event, summary *genai.Content, usage *gen
 				StartTimestamp:   start,
 				EndTimestamp:     end,
 				CompactedContent: &content,
+				CoveredEventIDs:  covered,
 			},
 		},
 		LLMResponse: model.LLMResponse{UsageMetadata: usage},

@@ -16,6 +16,7 @@ package llminternal_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -190,6 +191,9 @@ func TestCompactionProcessorSkipsOnCancelledContext(t *testing.T) {
 type racingSummarizer struct {
 	svc session.Service
 	t   *testing.T
+
+	// racedID is the ID of the event this summarizer landed mid-call.
+	racedID string
 }
 
 func (s *racingSummarizer) SummarizeEvents(ctx context.Context, events []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
@@ -209,29 +213,44 @@ func (s *racingSummarizer) SummarizeEvents(ctx context.Context, events []*sessio
 	if err := s.svc.AppendEvent(ctx, other.Session, late); err != nil {
 		s.t.Fatalf("racing AppendEvent() error = %v", err)
 	}
+	s.racedID = late.ID
 	return genai.NewContentFromText("SUMMARY", "model"), nil, nil
 }
 
-// TestCompactionProcessorDiscardsARacedSummary checks that a summary is thrown
-// away when another invocation appended inside its range while it was being
-// produced.
+// TestCompactionProcessorDoesNotCoverARacedEvent checks that an event appended
+// by another invocation while a summary was being produced is left out of what
+// that summary stands in for.
 //
-// Recording it would mark those turns as covered without having summarized
-// them, and every later prompt would drop them.
-func TestCompactionProcessorDiscardsARacedSummary(t *testing.T) {
+// A summary names the events it replaces, so a turn that arrived too late to be
+// summarized is simply not covered and stays raw in the prompt. That is what
+// makes the window between choosing a window and appending the summary safe,
+// which no check could have covered: an event landing in it is not named
+// either. The summary itself is worth keeping, since throwing it away would
+// spend a model call and store nothing.
+func TestCompactionProcessorDoesNotCoverARacedEvent(t *testing.T) {
 	t.Parallel()
 
 	svc, sess := tailRetentionFixture(t, 4)
 
+	summarizer := &racingSummarizer{svc: svc, t: t}
 	err := runCompactionProcessor(t, svc, sess, &compaction.Config{
 		TokenThreshold:     100,
 		EventRetentionSize: 2,
-		Summarizer:         &racingSummarizer{svc: svc, t: t},
+		Summarizer:         summarizer,
 	})
 	if err != nil {
 		t.Fatalf("CompactionRequestProcessor failed: %v", err)
 	}
-	if got := len(storedCompactions(t, svc)); got != 0 {
-		t.Errorf("stored %d compaction events, want 0: a summary whose range was raced must be discarded", got)
+
+	stored := storedCompactions(t, svc)
+	if len(stored) != 1 {
+		t.Fatalf("stored %d compaction events, want 1: the summary is usable and was paid for", len(stored))
+	}
+	if summarizer.racedID == "" {
+		t.Fatal("the racing summarizer did not record the ID it appended")
+	}
+	covered := stored[0].Actions.Compaction.CoveredEventIDs
+	if slices.Contains(covered, summarizer.racedID) {
+		t.Errorf("the summary covers %q, which was appended after its window was chosen and summarized by nothing", summarizer.racedID)
 	}
 }
