@@ -133,24 +133,63 @@ func TestControllerOptionsToleratesNil(t *testing.T) {
 // the sliding window, which counts completed invocations within one session,
 // can never reach its interval. Silently doing nothing is the bad outcome here:
 // the operator has configured compaction and will believe it is working.
-func TestWithEventsCompactionConfigWarnsWhenItCannotFire(t *testing.T) {
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-
+func TestWithEventsCompactionConfigWarnsAboutSlidingWindows(t *testing.T) {
 	tc := TriggerConfig{MaxConcurrentRuns: 1}
 
-	NewPubSubControllerWithOptions(nil, nil, nil, nil, runner.PluginConfig{}, tc,
-		WithEventsCompactionConfig(&compaction.Config{CompactionInterval: 2}))
-	if !strings.Contains(buf.String(), "never fire") {
-		t.Errorf("no warning for a sliding-window-only config on a trigger surface; log was %q", buf.String())
+	tests := []struct {
+		name string
+		cfg  *compaction.Config
+		want string // a phrase the warning must contain, or "" for silence
+	}{
+		{
+			name: "interval above one cannot reach its interval in one attempt",
+			cfg:  &compaction.Config{CompactionInterval: 2},
+			want: "will not reach its interval",
+		},
+		{
+			// It does fire here, on every delivery, which the old warning
+			// denied. The waste is the summary, not the silence: the session it
+			// is written into is discarded when the delivery ends.
+			name: "interval of one fires and is wasted",
+			cfg:  &compaction.Config{CompactionInterval: 1},
+			want: "discarded when the delivery ends",
+		},
+		{
+			name: "tail retention works here and must not warn",
+			cfg:  &compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2},
+		},
+		{
+			// The sliding window is just as inert alongside tail retention, so
+			// enabling both must not buy silence about the half that cannot run.
+			name: "a sliding window still warns when tail retention is also set",
+			cfg:  &compaction.Config{CompactionInterval: 2, TokenThreshold: 1000, EventRetentionSize: 2},
+			want: "will not reach its interval",
+		},
+		{
+			name: "no config at all",
+			cfg:  nil,
+		},
 	}
 
-	// Tail retention does work here, so it must not warn.
-	buf.Reset()
-	NewPubSubControllerWithOptions(nil, nil, nil, nil, runner.PluginConfig{}, tc,
-		WithEventsCompactionConfig(&compaction.Config{TokenThreshold: 1000, EventRetentionSize: 2}))
-	if strings.Contains(buf.String(), "never fire") {
-		t.Errorf("warned about a tail-retention config, which does fire here; log was %q", buf.String())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log.SetOutput(&buf)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+			NewPubSubControllerWithOptions(nil, nil, nil, nil, runner.PluginConfig{}, tc,
+				WithEventsCompactionConfig(tt.cfg))
+
+			got := buf.String()
+			if tt.want == "" {
+				if strings.Contains(got, "adk: sliding-window compaction") {
+					t.Errorf("warned about a configuration that works here; log was %q", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("warning does not mention %q; log was %q", tt.want, got)
+			}
+		})
 	}
 }

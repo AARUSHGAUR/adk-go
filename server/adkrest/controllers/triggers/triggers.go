@@ -63,25 +63,42 @@ type ControllerOption func(*RetriableRunner)
 // The sliding window reduces prompt size by a constant factor rather than
 // bounding it. Only tail retention bounds growth. See [compaction.Config].
 //
-// Note what a trigger surface is. Each delivery runs in a session of its own,
-// so history never accumulates across messages and the sliding window, which
-// counts completed invocations within one session, can never reach its
-// interval. Tail retention still works, because it measures the prompt inside a
-// single run. Configuring only a sliding window here is almost certainly a
-// mistake, so it is logged rather than silently doing nothing.
+// Note what a trigger surface is. A delivery gets a session of its own, so
+// history does not accumulate across messages and a sliding window counting
+// completed invocations has little to count. Tail retention works normally,
+// because it measures the prompt inside a single run.
+//
+// Two sliding-window configurations are worth a word, and neither is fatal, so
+// both are logged rather than rejected:
+//
+//   - An interval of 1 fires on every delivery, including a single-turn one. It
+//     spends a summarizer call to write a summary into a session that is
+//     discarded when the delivery ends, so nothing ever reads it.
+//   - A larger interval will not fire on a delivery handled in one attempt,
+//     because that session sees a single invocation. Retries of one delivery do
+//     share a session, so it can still fire on a message that was throttled.
 func WithEventsCompactionConfig(cfg *compaction.Config) ControllerOption {
 	return func(r *RetriableRunner) {
-		if cfg != nil && cfg.CompactionInterval > 0 && cfg.TokenThreshold == 0 {
-			log.Printf("adk: sliding-window compaction is configured on a trigger controller, " +
-				"but each delivery runs in a new session, so it will never fire. " +
-				"Use TokenThreshold and EventRetentionSize to compact within a single run.")
+		switch {
+		case cfg == nil:
+		case cfg.CompactionInterval == 1:
+			log.Printf("adk: sliding-window compaction is configured on a trigger controller with " +
+				"CompactionInterval 1, so it fires on every delivery and writes a summary into a " +
+				"session that is discarded when the delivery ends. Use TokenThreshold and " +
+				"EventRetentionSize to compact within a single run.")
+		case cfg.CompactionInterval > 1:
+			log.Printf("adk: sliding-window compaction is configured on a trigger controller, but a " +
+				"delivery handled in one attempt runs a single invocation, so the window will not " +
+				"reach its interval. Use TokenThreshold and EventRetentionSize to compact within a " +
+				"single run.")
 		}
 		r.eventsCompactionConfig = cfg
 	}
 }
 
 func (r *RetriableRunner) RunAgent(ctx context.Context, appName, userID, messageContent string) ([]*session.Event, error) {
-	// Each retry = new session
+	// One session per delivery. Retries of that delivery reuse it, so a
+	// throttled message accumulates invocations rather than starting over.
 	sessReq := &session.CreateRequest{
 		AppName: appName,
 		UserID:  userID,
