@@ -878,3 +878,34 @@ func TestWorkflowAgent_UnmatchedFunctionResponseRunsFresh(t *testing.T) {
 			"the turn was misrouted to Resume and the user's text was dropped", got)
 	}
 }
+
+// TestWorkflowAgent_Resume_ReentryIsIdempotent is the re-entry twin of
+// TestWorkflowAgent_Resume_Idempotent, which only covers handoff. Re-entry is
+// now the default for LlmAgent nodes, so a replayed approval must not re-run
+// the node — otherwise a double-submit re-executes whatever the human approved.
+func TestWorkflowAgent_Resume_ReentryIsIdempotent(t *testing.T) {
+	const fcID = "cred-1"
+	var runs atomic.Int32
+	var gotInput atomic.Bool
+	worker, err := workflow.NewAgentNode(
+		newConsentAgent(t, "worker", fcID, &runs, &gotInput),
+		workflow.NodeConfig{RerunOnResume: ptrTrue()},
+	)
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	a := makeAgent(t, workflow.Chain(workflow.Start, worker))
+	sess := newFakeSession()
+
+	runFreshTurn(t, sess, a, "start")
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, credentialResume(fcID))), nil)
+	afterFirst := runs.Load()
+
+	// Byte-identical replay of the same approval.
+	drainAgent(t, sess, a.Run(newMockCtx(sess, a, credentialResume(fcID))), workflow.ErrNothingToResume)
+
+	if got := runs.Load(); got != afterFirst {
+		t.Errorf("worker runs = %d after a replayed approval, want %d "+
+			"(a duplicate resume must reschedule nothing)", got, afterFirst)
+	}
+}
