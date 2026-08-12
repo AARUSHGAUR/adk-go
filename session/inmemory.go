@@ -237,7 +237,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			TransferToAgent:            event.Actions.TransferToAgent,
 			Escalate:                   event.Actions.Escalate,
 			SkipSummarization:          event.Actions.SkipSummarization,
-			Compaction:                 event.Actions.Compaction,
+			Compaction:                 event.Actions.Compaction.clone(),
 		},
 		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
 		Routes:             slices.Clone(event.Routes),

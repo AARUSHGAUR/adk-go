@@ -575,3 +575,47 @@ func TestCompactionSpanRecordsADecline(t *testing.T) {
 		t.Errorf("event_count = %d on a declined compaction, want 0", n)
 	}
 }
+
+// zeroStampSummarizer returns a summary whose covered range has no bounds, the
+// shape a summarizer produces from events that were never stamped.
+type zeroStampSummarizer struct{}
+
+func (zeroStampSummarizer) SummarizeEvents(context.Context, []*session.Event) (*session.Event, error) {
+	return &session.Event{
+		ID:     "sum",
+		Author: "user",
+		Actions: session.EventActions{
+			Compaction: &session.EventCompaction{
+				CompactedContent: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "SUM"}}},
+			},
+		},
+	}, nil
+}
+
+// TestCompactionSpanOmitsAbsentTimestamps pins that a range with no bounds is
+// reported as absent rather than as the year 1754.
+//
+// Epoch seconds of a zero time is -6.795e+09, so a compaction covering three
+// seconds of history was published as a range 271 years wide, on a span that
+// otherwise reported success. An absent attribute is the only form a consumer
+// can tell apart from a real reading.
+func TestCompactionSpanOmitsAbsentTimestamps(t *testing.T) {
+	exp := spanRecorder(t)
+
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
+		textEvent("c", "inv2", 3, "q2"), modelTextEvent("d", "inv2", 4, "a2"),
+	}
+	cfg := &compaction.Config{CompactionInterval: 2, Summarizer: zeroStampSummarizer{}}
+
+	if _, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events}); err != nil {
+		t.Fatalf("SlidingWindow() error = %v", err)
+	}
+	a := attrs(exp.GetSpans()[0].Attributes)
+
+	for _, key := range []string{"gen_ai.compaction.start_timestamp", "gen_ai.compaction.end_timestamp"} {
+		if v, ok := a[key]; ok {
+			t.Errorf("%s = %v, want the key to be absent for an unset bound", key, v.AsFloat64())
+		}
+	}
+}

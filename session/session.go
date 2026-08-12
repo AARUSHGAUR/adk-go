@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"slices"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -292,6 +293,33 @@ type EventCompaction struct {
 	// CompactedContent is the content that replaces the covered events in the
 	// prompt.
 	CompactedContent *genai.Content `json:"compactedContent"`
+}
+
+// clone returns a deep copy, or nil for a nil receiver.
+//
+// A stored compaction decides which events every future prompt drops, so of all
+// the fields on [EventActions] it is the one a producer must not be able to
+// edit after the append. Sharing the pointer let a caller move EndTimestamp
+// afterwards and silently change what history the agent sees, and tripped the
+// race detector on the way.
+func (c *EventCompaction) clone() *EventCompaction {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	if c.CompactedContent != nil {
+		content := *c.CompactedContent
+		content.Parts = slices.Clone(c.CompactedContent.Parts)
+		for i, p := range content.Parts {
+			if p == nil {
+				continue
+			}
+			part := *p
+			content.Parts[i] = &part
+		}
+		out.CompactedContent = &content
+	}
+	return &out
 }
 
 // Prefixes for defining session's state scopes

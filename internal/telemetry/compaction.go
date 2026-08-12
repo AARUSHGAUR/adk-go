@@ -188,11 +188,19 @@ func TraceCompactionResult(span trace.Span, params TraceCompactionResultParams) 
 			span.SetAttributes(genAICompactionOutputTokens.Int(int(u.CandidatesTokenCount)))
 		}
 	}
-	span.SetAttributes(
-		genAICompactionResultEventID.String(ev.ID),
-		genAICompactionStartTimestamp.Float64(epochSeconds(ev.Actions.Compaction.StartTimestamp)),
-		genAICompactionEndTimestamp.Float64(epochSeconds(ev.Actions.Compaction.EndTimestamp)),
-	)
+	attrs := []attribute.KeyValue{genAICompactionResultEventID.String(ev.ID)}
+	// A zero time means "no bound recorded", not a real instant. Sent as epoch
+	// seconds it reports the year 1754, which turned three seconds of history
+	// into a range 271 years wide on a span that otherwise says the compaction
+	// succeeded. The reference implementation omits the key instead, and an
+	// absent attribute is the one form a consumer can recognise as missing.
+	if ts := ev.Actions.Compaction.StartTimestamp; !ts.IsZero() {
+		attrs = append(attrs, genAICompactionStartTimestamp.Float64(epochSeconds(ts)))
+	}
+	if ts := ev.Actions.Compaction.EndTimestamp; !ts.IsZero() {
+		attrs = append(attrs, genAICompactionEndTimestamp.Float64(epochSeconds(ts)))
+	}
+	span.SetAttributes(attrs...)
 }
 
 // TraceCompactionDeclined records a compaction that fired but could not run.
