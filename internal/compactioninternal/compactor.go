@@ -113,19 +113,25 @@ func summarizeTraced(ctx context.Context, cfg *compaction.Config, sess session.S
 		span.End()
 	}()
 
-	summary, err := cfg.Summarizer.SummarizeEvents(ctx, window)
-	// A Summarizer is third-party code. One that returns an ordinary event
-	// instead of a compaction record would otherwise be appended verbatim,
-	// adding a conversational turn while compacting nothing. Checked before the
-	// result is recorded so the span shows the failure.
-	if err == nil && summary != nil && !compaction.IsCompactionEvent(summary) {
-		err = fmt.Errorf("summarizer returned an event carrying no compaction record")
-		summary = nil
+	content, usage, err := cfg.Summarizer.SummarizeEvents(ctx, window)
+
+	// The framework builds the event, so a summarizer contributes the summary
+	// and nothing else. Everything that decides what happens to history -- the
+	// covered range, the authorship, the actions -- is derived here from the
+	// window that was handed over.
+	var summary *session.Event
+	switch {
+	case err != nil:
+	case content == nil:
+		// A decline. Usage may still have been reported, and the span records
+		// it, so a summarizer that spent a call and got nothing usable back is
+		// distinguishable from one that never tried.
+	default:
+		summary, err = newSummaryEvent(window, content, usage)
 	}
-	// Stamped only once the result is known to be usable. A summarizer can
-	// return an event alongside an error, and that event is discarded, so
-	// stamping first spent a UUID on it and handed telemetry the identity of
-	// something that never reached the session.
+	// Stamped only once the result is known to be usable, so a discarded
+	// summary never spends a UUID or hands telemetry the identity of something
+	// that did not reach the session.
 	if err != nil {
 		summary = nil
 	} else {

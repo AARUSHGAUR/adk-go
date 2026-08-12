@@ -43,9 +43,9 @@ func (w *seedWrappedSession) Unwrap() session.Session { return w.Session }
 // fixedSummarizer returns one canned summary.
 type fixedSummarizer struct{ calls int }
 
-func (s *fixedSummarizer) SummarizeEvents(_ context.Context, events []*session.Event) (*session.Event, error) {
+func (s *fixedSummarizer) SummarizeEvents(_ context.Context, events []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
 	s.calls++
-	return compaction.NewSummaryEvent(events, genai.NewContentFromText("SUMMARY", "model"), nil)
+	return genai.NewContentFromText("SUMMARY", "model"), nil, nil
 }
 
 // tailRetentionFixture builds a stored session holding n exchanges, the last of
@@ -192,11 +192,7 @@ type racingSummarizer struct {
 	t   *testing.T
 }
 
-func (s *racingSummarizer) SummarizeEvents(ctx context.Context, events []*session.Event) (*session.Event, error) {
-	summary, err := compaction.NewSummaryEvent(events, genai.NewContentFromText("SUMMARY", "model"), nil)
-	if err != nil {
-		return nil, err
-	}
+func (s *racingSummarizer) SummarizeEvents(ctx context.Context, events []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
 	// Land a new event inside the range the summary claims, through a separate
 	// handle on the same stored session. Appending through the caller's handle
 	// would update that handle too, which is exactly what a concurrent
@@ -207,12 +203,13 @@ func (s *racingSummarizer) SummarizeEvents(ctx context.Context, events []*sessio
 	}
 	late := session.NewEvent(ctx, "other-invocation")
 	late.Author = "user"
-	late.Timestamp = summary.Actions.Compaction.StartTimestamp.Add(time.Millisecond)
+	// Inside the range the framework will derive from the window it handed over.
+	late.Timestamp = events[0].Timestamp.Add(time.Millisecond)
 	late.LLMResponse.Content = genai.NewContentFromText("CONCURRENT", "user")
 	if err := s.svc.AppendEvent(ctx, other.Session, late); err != nil {
 		s.t.Fatalf("racing AppendEvent() error = %v", err)
 	}
-	return summary, nil
+	return genai.NewContentFromText("SUMMARY", "model"), nil, nil
 }
 
 // TestCompactionProcessorDiscardsARacedSummary checks that a summary is thrown

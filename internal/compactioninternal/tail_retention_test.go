@@ -178,9 +178,9 @@ func TestSelectTailRetentionWindowSeedsPreviousSummary(t *testing.T) {
 
 	// Summarizing this window must produce a range that strictly contains the
 	// old one, so Apply treats the old summary as subsumed.
-	summary, err := compaction.NewSummaryEvent(window, genai.NewContentFromText("new summary", "model"), nil)
+	summary, err := newSummaryEvent(window, genai.NewContentFromText("new summary", "model"), nil)
 	if err != nil {
-		t.Fatalf("compaction.NewSummaryEvent() error = %v", err)
+		t.Fatalf("newSummaryEvent() error = %v", err)
 	}
 	summary.ID, summary.Timestamp = "s2", at(8)
 	if !summary.Actions.Compaction.StartTimestamp.Equal(at(1)) {

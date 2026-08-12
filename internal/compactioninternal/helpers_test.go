@@ -23,7 +23,6 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
-	"google.golang.org/adk/v2/session/compaction"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -128,7 +127,7 @@ func compactionEvent(id string, ts, start, end int, summary string) *session.Eve
 // so window-selection behaviour can be tested without a model.
 type fakeSummarizer struct {
 	// summary is the text of the returned summary. Empty means "decline",
-	// which makes SummarizeEvents return a nil event.
+	// which makes SummarizeEvents return no content.
 	summary string
 	// err, when set, is returned instead of a summary.
 	err error
@@ -138,16 +137,16 @@ type fakeSummarizer struct {
 	calls   int
 }
 
-func (f *fakeSummarizer) SummarizeEvents(_ context.Context, events []*session.Event) (*session.Event, error) {
+func (f *fakeSummarizer) SummarizeEvents(_ context.Context, events []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
 	f.calls++
 	f.windows = append(f.windows, ids(events))
 	if f.err != nil {
-		return nil, f.err
+		return nil, nil, f.err
 	}
 	if f.summary == "" || len(events) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return compaction.NewSummaryEvent(events, &genai.Content{Parts: []*genai.Part{{Text: f.summary}}}, nil)
+	return &genai.Content{Parts: []*genai.Part{{Text: f.summary}}}, nil, nil
 }
 
 // fakeModel returns canned responses and records the requests it received.

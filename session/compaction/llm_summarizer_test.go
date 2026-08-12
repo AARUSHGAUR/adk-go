@@ -76,7 +76,7 @@ func promptFor(t *testing.T, cfg LLMSummarizerConfig, events []*session.Event) s
 	if err != nil {
 		t.Fatalf("NewLLMSummarizer() error = %v", err)
 	}
-	if _, err := s.SummarizeEvents(context.Background(), events); err != nil {
+	if _, _, err := s.SummarizeEvents(context.Background(), events); err != nil {
 		t.Fatalf("SummarizeEvents() error = %v", err)
 	}
 	if len(m.requests) != 1 {
@@ -205,29 +205,21 @@ func TestLLMSummarizerSummarizeEvents(t *testing.T) {
 	}
 
 	events := []*session.Event{textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 4, "a1")}
-	got, err := s.SummarizeEvents(context.Background(), events)
+	// A summarizer returns the summary and what it cost. The event that carries
+	// it, its covered range and its authorship are the framework's to derive,
+	// and are covered in compactioninternal.
+	got, gotUsage, err := s.SummarizeEvents(context.Background(), events)
 	if err != nil {
 		t.Fatalf("SummarizeEvents() error = %v", err)
 	}
 	if got == nil {
-		t.Fatal("SummarizeEvents() returned nil, want a compaction event")
+		t.Fatal("SummarizeEvents() returned no content, want the summary")
 	}
-	if got.Actions.Compaction == nil {
-		t.Fatal("returned event carries no compaction")
-	}
-	if !got.Actions.Compaction.StartTimestamp.Equal(at(1)) || !got.Actions.Compaction.EndTimestamp.Equal(at(4)) {
-		t.Errorf("compaction range = [%v, %v], want [%v, %v]",
-			got.Actions.Compaction.StartTimestamp, got.Actions.Compaction.EndTimestamp, at(1), at(4))
-	}
-	texts := utils.TextParts(got.Actions.Compaction.CompactedContent)
-	if diff := cmp.Diff([]string{"the summary"}, texts); diff != "" {
+	if diff := cmp.Diff([]string{"the summary"}, utils.TextParts(got)); diff != "" {
 		t.Errorf("summary text mismatch (-want +got):\n%s", diff)
 	}
-	if got.UsageMetadata != usage {
-		t.Errorf("UsageMetadata = %v, want the summarizer call's usage carried through", got.UsageMetadata)
-	}
-	if got.Author != "user" {
-		t.Errorf("Author = %q, want %q", got.Author, "user")
+	if gotUsage != usage {
+		t.Errorf("usage = %v, want the summarizer call's usage carried through", gotUsage)
 	}
 }
 
@@ -313,7 +305,7 @@ func TestLLMSummarizerEdgeCases(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewLLMSummarizer() error = %v", err)
 			}
-			got, err := s.SummarizeEvents(context.Background(), tc.events)
+			got, _, err := s.SummarizeEvents(context.Background(), tc.events)
 			if gotErr := err != nil; gotErr != tc.wantErr {
 				t.Fatalf("SummarizeEvents() error = %v, wantErr %t", err, tc.wantErr)
 			}
@@ -482,16 +474,16 @@ func TestSummarizeEventsIgnoresPartialResponses(t *testing.T) {
 		textEvent("a", "inv1", 1, "q1"),
 		modelTextEvent("b", "inv1", 2, "a1"),
 	}
-	got, err := s.SummarizeEvents(t.Context(), events)
+	got, usage, err := s.SummarizeEvents(t.Context(), events)
 	if err != nil {
 		t.Fatalf("SummarizeEvents() error = %v", err)
 	}
 
-	text := got.Actions.Compaction.CompactedContent.Parts[0].Text
+	text := got.Parts[0].Text
 	if text != "chunk-1chunk-2chunk-3" {
 		t.Errorf("summary text = %q, want the aggregated response, not a fragment", text)
 	}
-	if got.LLMResponse.UsageMetadata == nil {
+	if usage == nil {
 		t.Error("usage metadata is nil; it arrives only on the final, non-partial response")
 	}
 }
@@ -590,7 +582,7 @@ func TestSummarizeEventsRefusesAnOversizedTranscript(t *testing.T) {
 			&genai.Part{Text: strings.Repeat("y", 500)}))
 	}
 
-	got, err := s.SummarizeEvents(t.Context(), events)
+	got, _, err := s.SummarizeEvents(t.Context(), events)
 	if err == nil {
 		t.Fatalf("SummarizeEvents() accepted an oversized transcript and returned %v, want an error", got)
 	}
@@ -658,7 +650,7 @@ func TestSummarizeEventsHonoursTimeout(t *testing.T) {
 
 	events := []*session.Event{textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1")}
 	done := make(chan error, 1)
-	go func() { _, err := s.SummarizeEvents(context.Background(), events); done <- err }()
+	go func() { _, _, err := s.SummarizeEvents(context.Background(), events); done <- err }()
 
 	select {
 	case err := <-done:

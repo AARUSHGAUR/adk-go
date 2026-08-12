@@ -79,7 +79,7 @@ type recordingSummarizer struct {
 	windows [][]string // authors of the events in each window
 }
 
-func (s *recordingSummarizer) SummarizeEvents(_ context.Context, events []*session.Event) (*session.Event, error) {
+func (s *recordingSummarizer) SummarizeEvents(_ context.Context, events []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
 	s.mu.Lock()
 	authors := make([]string, len(events))
 	for i, ev := range events {
@@ -88,7 +88,7 @@ func (s *recordingSummarizer) SummarizeEvents(_ context.Context, events []*sessi
 	s.windows = append(s.windows, authors)
 	s.mu.Unlock()
 
-	return compaction.NewSummaryEvent(events, genai.NewContentFromText(s.summary, "model"), nil)
+	return genai.NewContentFromText(s.summary, "model"), nil, nil
 }
 
 func (s *recordingSummarizer) calls() int {
@@ -365,8 +365,8 @@ func promptText(contents []*genai.Content) string {
 	return b.String()
 }
 
-func (failingSummarizer) SummarizeEvents(context.Context, []*session.Event) (*session.Event, error) {
-	return nil, errors.New("summarizer exploded")
+func (failingSummarizer) SummarizeEvents(context.Context, []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
+	return nil, nil, errors.New("summarizer exploded")
 }
 
 // TestRunnerPostInvocationCompactionFailureSurfaces pins that a post-invocation
@@ -1151,8 +1151,8 @@ func TestRunnerBothStrategiesCoexist(t *testing.T) {
 // what a summarizer whose own context died looks like.
 type cancelingSummarizer struct{}
 
-func (s *cancelingSummarizer) SummarizeEvents(_ context.Context, _ []*session.Event) (*session.Event, error) {
-	return nil, fmt.Errorf("summarizer model call failed: %w", context.Canceled)
+func (s *cancelingSummarizer) SummarizeEvents(_ context.Context, _ []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
+	return nil, nil, fmt.Errorf("summarizer model call failed: %w", context.Canceled)
 }
 
 // TestTailRetentionCancelledSummarizerLeavesTheTurnIntact covers the case that

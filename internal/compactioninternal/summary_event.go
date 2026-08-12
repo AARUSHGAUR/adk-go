@@ -12,18 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package compaction
+package compactioninternal
 
 import (
 	"fmt"
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
 
-// NewSummaryEvent builds the event a [Summarizer] returns from the summary it
+// newSummaryEvent builds the event a [Summarizer] returns from the summary it
 // produced. Implementations should call it rather than assembling the event
 // themselves: it derives the range the summary covers, applies the authorship
 // a stored summary needs, and refuses input that would produce a broken
@@ -47,7 +48,7 @@ import (
 // still consuming a summary. [session.EventCompaction] is a plain struct with
 // no constructor to validate in, so the checks live here, at the supported
 // way to build one.
-func NewSummaryEvent(events []*session.Event, summary *genai.Content, usage *genai.GenerateContentResponseUsageMetadata) (*session.Event, error) {
+func newSummaryEvent(events []*session.Event, summary *genai.Content, usage *genai.GenerateContentResponseUsageMetadata) (*session.Event, error) {
 	if len(events) == 0 {
 		return nil, fmt.Errorf("cannot summarize an empty event list")
 	}
@@ -55,7 +56,7 @@ func NewSummaryEvent(events []*session.Event, summary *genai.Content, usage *gen
 	// whose content says nothing deletes the covered turns from every future
 	// prompt and puts nothing in their place, which is worse than not
 	// compacting at all.
-	if !hasText(summary) {
+	if !hasProse(summary) {
 		return nil, fmt.Errorf("summary content is empty, so compacting would delete the covered events and replace them with nothing")
 	}
 	// NewSummaryEvent is exported and called by third-party Summarizer
@@ -98,7 +99,7 @@ func NewSummaryEvent(events []*session.Event, summary *genai.Content, usage *gen
 	// that silently.
 	content := genai.Content{Role: "model"}
 	for _, p := range summary.Parts {
-		if !isProse(p) {
+		if !utils.IsProsePart(p) {
 			continue
 		}
 		part := *p
@@ -133,22 +134,15 @@ func NewSummaryEvent(events []*session.Event, summary *genai.Content, usage *gen
 	}, nil
 }
 
-// isProse reports whether p is plain text and nothing else.
-//
-// Exactly one field of a [genai.Part] is meant to be set, so a part that
-// carries any of the actionable payloads is not prose whatever else is on it.
-// Such a part is dropped rather than reduced to its text: the text is not what
-// makes it dangerous, and dropping is the conservative half of the choice.
-func isProse(p *genai.Part) bool {
-	if p == nil || p.Text == "" {
+// hasProse reports whether c carries at least one prose part.
+func hasProse(c *genai.Content) bool {
+	if c == nil {
 		return false
 	}
-	return p.FunctionCall == nil &&
-		p.FunctionResponse == nil &&
-		p.ExecutableCode == nil &&
-		p.CodeExecutionResult == nil &&
-		p.FileData == nil &&
-		p.InlineData == nil &&
-		p.ToolCall == nil &&
-		p.ToolResponse == nil
+	for _, p := range c.Parts {
+		if utils.IsProsePart(p) {
+			return true
+		}
+	}
+	return false
 }

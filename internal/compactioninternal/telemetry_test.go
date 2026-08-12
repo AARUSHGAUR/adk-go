@@ -217,12 +217,9 @@ func TestSpanRecordsDecliningSummarizer(t *testing.T) {
 // third-party Summarizer is free to do.
 type bothSummarizer struct{}
 
-func (s *bothSummarizer) SummarizeEvents(_ context.Context, events []*session.Event) (*session.Event, error) {
-	ev, err := compaction.NewSummaryEvent(events, genai.NewContentFromText("SUM", "model"), nil)
-	if err != nil {
-		return nil, err
-	}
-	return ev, errors.New("boom")
+func (s *bothSummarizer) SummarizeEvents(_ context.Context, events []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
+	// Content alongside an error. The framework must discard the content.
+	return genai.NewContentFromText("SUM", "model"), nil, errors.New("boom")
 }
 
 // TestCompactionSpanOmitsResultWhenSummarizerAlsoErrors pins that a span is
@@ -267,7 +264,7 @@ func TestCompactionSpanOmitsResultWhenSummarizerAlsoErrors(t *testing.T) {
 // panickingSummarizer models third-party code that blows up.
 type panickingSummarizer struct{}
 
-func (s *panickingSummarizer) SummarizeEvents(_ context.Context, _ []*session.Event) (*session.Event, error) {
+func (s *panickingSummarizer) SummarizeEvents(_ context.Context, _ []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
 	panic("summarizer exploded")
 }
 
@@ -412,16 +409,15 @@ type usageSummarizer struct {
 	output int32
 }
 
-func (s *usageSummarizer) SummarizeEvents(ctx context.Context, events []*session.Event) (*session.Event, error) {
-	ev, err := s.fakeSummarizer.SummarizeEvents(ctx, events)
-	if err != nil || ev == nil {
-		return ev, err
+func (s *usageSummarizer) SummarizeEvents(ctx context.Context, events []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
+	content, _, err := s.fakeSummarizer.SummarizeEvents(ctx, events)
+	if err != nil || content == nil {
+		return content, nil, err
 	}
-	ev.LLMResponse.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+	return content, &genai.GenerateContentResponseUsageMetadata{
 		PromptTokenCount:     s.prompt,
 		CandidatesTokenCount: s.output,
-	}
-	return ev, nil
+	}, nil
 }
 
 // TestCompactionSpanAttributeKeySet pins the exact set of attribute keys.
@@ -576,22 +572,6 @@ func TestCompactionSpanRecordsADecline(t *testing.T) {
 	}
 }
 
-// zeroStampSummarizer returns a summary whose covered range has no bounds, the
-// shape a summarizer produces from events that were never stamped.
-type zeroStampSummarizer struct{}
-
-func (zeroStampSummarizer) SummarizeEvents(context.Context, []*session.Event) (*session.Event, error) {
-	return &session.Event{
-		ID:     "sum",
-		Author: "user",
-		Actions: session.EventActions{
-			Compaction: &session.EventCompaction{
-				CompactedContent: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "SUM"}}},
-			},
-		},
-	}, nil
-}
-
 // TestCompactionSpanOmitsAbsentTimestamps pins that a range with no bounds is
 // reported as absent rather than as the year 1754.
 //
@@ -599,23 +579,35 @@ func (zeroStampSummarizer) SummarizeEvents(context.Context, []*session.Event) (*
 // seconds of history was published as a range 271 years wide, on a span that
 // otherwise reported success. An absent attribute is the only form a consumer
 // can tell apart from a real reading.
+//
+// The range is derived from the covered events, so the way to reach an unset
+// bound is a covered event that was never stamped, which is what these events
+// are. Nothing on the append path used to fill a missing timestamp in.
 func TestCompactionSpanOmitsAbsentTimestamps(t *testing.T) {
 	exp := spanRecorder(t)
 
+	// Only the oldest event is unstamped, so the window still has a real upper
+	// bound and the selection logic, which compares against the previous
+	// compaction's end, still sees the later invocations as new.
+	first := textEvent("a", "inv1", 1, "q1")
+	first.Timestamp = time.Time{}
 	events := []*session.Event{
-		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
+		first, modelTextEvent("b", "inv1", 2, "a1"),
 		textEvent("c", "inv2", 3, "q2"), modelTextEvent("d", "inv2", 4, "a2"),
 	}
-	cfg := &compaction.Config{CompactionInterval: 2, Summarizer: zeroStampSummarizer{}}
+	cfg := &compaction.Config{CompactionInterval: 2, Summarizer: &fakeSummarizer{summary: "SUM"}}
 
 	if _, err := SlidingWindow(context.Background(), cfg, &staticSession{events: events}); err != nil {
 		t.Fatalf("SlidingWindow() error = %v", err)
 	}
 	a := attrs(exp.GetSpans()[0].Attributes)
 
-	for _, key := range []string{"gen_ai.compaction.start_timestamp", "gen_ai.compaction.end_timestamp"} {
-		if v, ok := a[key]; ok {
-			t.Errorf("%s = %v, want the key to be absent for an unset bound", key, v.AsFloat64())
-		}
+	if v, ok := a["gen_ai.compaction.start_timestamp"]; ok {
+		t.Errorf("start_timestamp = %v, want the key to be absent for an unset bound", v.AsFloat64())
+	}
+	// The bound that does exist is still reported, so absence means absence
+	// rather than the attribute simply being dropped.
+	if _, ok := a["gen_ai.compaction.end_timestamp"]; !ok {
+		t.Error("end_timestamp is missing, want the bound that was recorded")
 	}
 }

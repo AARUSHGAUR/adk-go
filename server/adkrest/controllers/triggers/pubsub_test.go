@@ -31,10 +31,13 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/controllers/triggers"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
 )
@@ -186,8 +189,8 @@ func createMockAgent(t *testing.T, results []error, runCount *int, expectedAttri
 // failingSummarizer stands in for a summarizer outage.
 type failingSummarizer struct{}
 
-func (failingSummarizer) SummarizeEvents(context.Context, []*session.Event) (*session.Event, error) {
-	return nil, errors.New("summarizer unavailable")
+func (failingSummarizer) SummarizeEvents(context.Context, []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
+	return nil, nil, errors.New("summarizer unavailable")
 }
 
 // TestPubSubTriggerSurvivesACompactionFailure pins that a compaction failure

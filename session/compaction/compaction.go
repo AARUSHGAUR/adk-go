@@ -52,6 +52,8 @@ import (
 	"errors"
 	"fmt"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/v2/session"
 )
 
@@ -175,22 +177,30 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// Summarizer compacts a range of events into a single summary event.
+// Summarizer condenses a range of events into a single piece of content.
 //
 // Implement it to control which parts of an event reach the summary and how the
-// summary is produced; [LLMSummarizer] is the default implementation.
+// summary is produced. [LLMSummarizer] is the default implementation.
+//
+// An implementation returns only the summary. The framework builds the event
+// that carries it, derives the range it covers from the events it handed over,
+// and appends it. That division is deliberate: a summarizer that returned a
+// whole event could also set the authorship, the state delta, an agent
+// transfer, and the range of history to delete, none of which is summarizing.
 type Summarizer interface {
-	// SummarizeEvents summarizes events into one new event carrying the result
-	// on its Actions.Compaction field. Build that event with [NewSummaryEvent]
-	// rather than by hand. The events passed in are never modified.
+	// SummarizeEvents summarizes events into one piece of content, with the
+	// token usage the summary cost when that is known. The events passed in are
+	// never modified.
 	//
-	// The two nil returns mean different things. A nil event with a nil error
-	// is a decline: this range was not summarized, and the caller leaves
-	// history untouched and carries on. A nil event with a non-nil error is a
-	// failure, which is reported and traced. Reporting a failure as a decline
-	// makes a summarizer that never succeeds look identical to an idle one
-	// while the prompt keeps growing on every turn.
-	SummarizeEvents(ctx context.Context, events []*session.Event) (*session.Event, error)
+	// Returning no content and no error is a decline: this range was not
+	// summarized, the caller leaves history alone and carries on. Returning an
+	// error is a failure, which is reported and traced. Reporting a failure as
+	// a decline makes a summarizer that never succeeds look identical to an
+	// idle one while the prompt keeps growing on every turn.
+	//
+	// Usage may be reported alongside a decline, for a summarizer that spent a
+	// model call and got nothing usable back. It is nil when unknown.
+	SummarizeEvents(ctx context.Context, events []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error)
 }
 
 // IsCompactionEvent reports whether ev carries a context-compaction summary

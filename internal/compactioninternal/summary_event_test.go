@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package compaction
+package compactioninternal
 
 import (
 	"testing"
@@ -34,9 +34,9 @@ func TestNewSummaryEvent(t *testing.T) {
 	}
 	summaryContent := utils.Content(modelTextEvent("x", "inv1", 0, "the summary"))
 
-	got, err := NewSummaryEvent(events, summaryContent, nil)
+	got, err := newSummaryEvent(events, summaryContent, nil)
 	if err != nil {
-		t.Fatalf("NewSummaryEvent() error = %v", err)
+		t.Fatalf("newSummaryEvent() error = %v", err)
 	}
 
 	if got.Author != "user" {
@@ -89,9 +89,9 @@ func TestNewSummaryEventRejectsBadInput(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := NewSummaryEvent(tc.events, tc.summary, nil)
+			_, err := newSummaryEvent(tc.events, tc.summary, nil)
 			if gotErr := err != nil; gotErr != tc.wantErr {
-				t.Errorf("NewSummaryEvent() error = %v, wantErr %t", err, tc.wantErr)
+				t.Errorf("newSummaryEvent() error = %v, wantErr %t", err, tc.wantErr)
 			}
 		})
 	}
@@ -115,9 +115,9 @@ func TestNewSummaryEventKeepsPartMetadata(t *testing.T) {
 		ThoughtSignature: []byte("opaque-signature"),
 	}}}
 
-	got, err := NewSummaryEvent(events, summary, nil)
+	got, err := newSummaryEvent(events, summary, nil)
 	if err != nil {
-		t.Fatalf("NewSummaryEvent() error = %v", err)
+		t.Fatalf("newSummaryEvent() error = %v", err)
 	}
 	parts := got.Actions.Compaction.CompactedContent.Parts
 	if len(parts) != 1 {
@@ -142,8 +142,8 @@ func TestNewSummaryEventRejectsProselessSummary(t *testing.T) {
 		FunctionCall: &genai.FunctionCall{Name: "transfer_funds"},
 	}}}
 
-	if _, err := NewSummaryEvent(events, summary, nil); err == nil {
-		t.Error("NewSummaryEvent() accepted a summary with no prose, want an error rather than an empty summary")
+	if _, err := newSummaryEvent(events, summary, nil); err == nil {
+		t.Error("newSummaryEvent() accepted a summary with no prose, want an error rather than an empty summary")
 	}
 }
 
@@ -160,9 +160,9 @@ func TestCompactionEventIsNotAFinalResponse(t *testing.T) {
 		{Timestamp: time.Unix(1, 0)},
 		{Timestamp: time.Unix(2, 0)},
 	}
-	got, err := NewSummaryEvent(events, genai.NewContentFromText("the summary", "model"), nil)
+	got, err := newSummaryEvent(events, genai.NewContentFromText("the summary", "model"), nil)
 	if err != nil {
-		t.Fatalf("NewSummaryEvent() error = %v", err)
+		t.Fatalf("newSummaryEvent() error = %v", err)
 	}
 
 	if got.IsFinalResponse() {
@@ -185,8 +185,8 @@ func TestNewSummaryEventRejectsInteriorDisorder(t *testing.T) {
 		{Timestamp: time.Unix(9, 0)}, // past the last one
 		{Timestamp: time.Unix(5, 0)},
 	}
-	if _, err := NewSummaryEvent(events, genai.NewContentFromText("s", "model"), nil); err == nil {
-		t.Error("NewSummaryEvent() accepted a window with an out-of-order middle")
+	if _, err := newSummaryEvent(events, genai.NewContentFromText("s", "model"), nil); err == nil {
+		t.Error("newSummaryEvent() accepted a window with an out-of-order middle")
 	}
 }
 
@@ -202,7 +202,39 @@ func TestNewSummaryEventRejectsThoughtOnlySummary(t *testing.T) {
 	events := []*session.Event{{Timestamp: time.Unix(1, 0)}, {Timestamp: time.Unix(2, 0)}}
 	summary := &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "thinking about it", Thought: true}}}
 
-	if _, err := NewSummaryEvent(events, summary, nil); err == nil {
-		t.Error("NewSummaryEvent() accepted a thought-only summary")
+	if _, err := newSummaryEvent(events, summary, nil); err == nil {
+		t.Error("newSummaryEvent() accepted a thought-only summary")
+	}
+}
+
+// TestNewSummaryEventDropsThoughtsFromAMixedSummary pins that a thinking
+// model's reasoning does not reach the stored summary alongside real prose.
+//
+// The gate rejected a thought-only summary, but the part filter admitted
+// thoughts, so a summary carrying one real sentence and the reasoning behind it
+// stored both. A stored summary is replayed into every later prompt as
+// something the model said, and its private reasoning is not that.
+func TestNewSummaryEventDropsThoughtsFromAMixedSummary(t *testing.T) {
+	t.Parallel()
+
+	events := []*session.Event{{Timestamp: time.Unix(1, 0)}, {Timestamp: time.Unix(2, 0)}}
+	summary := &genai.Content{Role: "model", Parts: []*genai.Part{
+		{Text: "the user asked about the weather", Thought: true},
+		{Text: "The user asked about the weather in Zurich."},
+	}}
+
+	got, err := newSummaryEvent(events, summary, nil)
+	if err != nil {
+		t.Fatalf("newSummaryEvent() error = %v", err)
+	}
+	stored := got.Actions.Compaction.CompactedContent.Parts
+	if len(stored) != 1 {
+		t.Fatalf("stored %d parts, want 1: the thought must be dropped", len(stored))
+	}
+	if stored[0].Thought {
+		t.Error("the stored part is the thought, want the prose")
+	}
+	if stored[0].Text != "The user asked about the weather in Zurich." {
+		t.Errorf("stored text = %q, want the prose part", stored[0].Text)
 	}
 }

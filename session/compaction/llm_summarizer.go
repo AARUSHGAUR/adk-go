@@ -167,14 +167,14 @@ func NewLLMSummarizer(cfg LLMSummarizerConfig) (*LLMSummarizer, error) {
 }
 
 // SummarizeEvents implements [Summarizer].
-func (s *LLMSummarizer) SummarizeEvents(ctx context.Context, events []*session.Event) (*session.Event, error) {
+func (s *LLMSummarizer) SummarizeEvents(ctx context.Context, events []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
 	if len(events) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	transcript, err := s.renderTranscript(events)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	prompt := strings.Replace(s.promptTemplate, ConversationHistoryPlaceholder, transcript, 1)
 	req := &model.LLMRequest{
@@ -194,7 +194,7 @@ func (s *LLMSummarizer) SummarizeEvents(ctx context.Context, events []*session.E
 	var finishReason genai.FinishReason
 	for resp, err := range s.model.GenerateContent(ctx, req, false) {
 		if err != nil {
-			return nil, fmt.Errorf("summarizer model call failed: %w", err)
+			return nil, nil, fmt.Errorf("summarizer model call failed: %w", err)
 		}
 		if resp == nil {
 			continue
@@ -218,7 +218,7 @@ func (s *LLMSummarizer) SummarizeEvents(ctx context.Context, events []*session.E
 		if !hasText(resp.Content) {
 			continue
 		}
-		return NewSummaryEvent(events, resp.Content, resp.UsageMetadata)
+		return resp.Content, resp.UsageMetadata, nil
 	}
 
 	// Nothing usable came back. This is a failure, not a decision to skip.
@@ -226,9 +226,9 @@ func (s *LLMSummarizer) SummarizeEvents(ctx context.Context, events []*session.E
 	// every single call indistinguishable from an idle one, and would hide the
 	// safety, recitation and token-limit stops that surface exactly this way.
 	if finishReason != "" {
-		return nil, fmt.Errorf("summarizer returned no usable content (finish reason %q)", finishReason)
+		return nil, nil, fmt.Errorf("summarizer returned no usable content (finish reason %q)", finishReason)
 	}
-	return nil, fmt.Errorf("summarizer returned no usable content")
+	return nil, nil, fmt.Errorf("summarizer returned no usable content")
 }
 
 // hasText reports whether c carries at least one non-empty text part, which is
@@ -462,7 +462,7 @@ func countRenderedParts(events []*session.Event) int {
 			if p == nil {
 				continue
 			}
-			if p.Text != "" || p.FunctionCall != nil || p.FunctionResponse != nil || isProse(p) {
+			if p.Text != "" || p.FunctionCall != nil || p.FunctionResponse != nil || utils.IsProsePart(p) {
 				n++
 			}
 		}

@@ -71,8 +71,8 @@ func (m *echoModel) lastPrompt() []*genai.Content {
 // model's wording.
 type stubSummarizer struct{ text string }
 
-func (s stubSummarizer) SummarizeEvents(_ context.Context, events []*session.Event) (*session.Event, error) {
-	return compaction.NewSummaryEvent(events, genai.NewContentFromText(s.text, "model"), nil)
+func (s stubSummarizer) SummarizeEvents(_ context.Context, events []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
+	return genai.NewContentFromText(s.text, "model"), nil, nil
 }
 
 // TestRESTCompaction_EnabledViaServerConfig is the guard that context
