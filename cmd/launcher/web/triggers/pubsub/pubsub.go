@@ -112,7 +112,7 @@ func (p *pubsubLauncher) SetupSubrouters(router *mux.Router, config *launcher.Co
 		MaxConcurrentRuns: p.config.triggerMaxRuns,
 	}
 
-	controller := triggers.NewPubSubControllerWithOptions(
+	controller, err := triggers.NewPubSubControllerWithOptions(
 		config.SessionService,
 		config.AgentLoader,
 		config.MemoryService,
@@ -121,6 +121,9 @@ func (p *pubsubLauncher) SetupSubrouters(router *mux.Router, config *launcher.Co
 		triggerConfig,
 		triggers.WithEventsCompactionConfig(config.EventsCompactionConfig),
 	)
+	if err != nil {
+		return err
+	}
 
 	subrouter := router
 	if p.config.pathPrefix != "" && p.config.pathPrefix != "/" {

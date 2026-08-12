@@ -96,6 +96,52 @@ func WithEventsCompactionConfig(cfg *compaction.Config) ControllerOption {
 	}
 }
 
+// validateCompaction reports whether the compaction config can actually serve
+// the apps behind this controller.
+//
+// A trigger controller returns only a controller until now, so an unusable
+// configuration could not be refused: it constructed fine and then failed every
+// delivery with a 500, which Pub/Sub push reads as a NACK and redelivers for
+// ever. A dry run of runner.New per app is the same code path a delivery takes,
+// so this cannot drift from it, and constructing a runner does no I/O.
+func (r *RetriableRunner) validateCompaction() error {
+	if r.eventsCompactionConfig == nil {
+		return nil
+	}
+	if err := r.eventsCompactionConfig.Validate(); err != nil {
+		return fmt.Errorf("invalid EventsCompactionConfig: %w", err)
+	}
+	if r.agentLoader == nil {
+		return nil
+	}
+	for _, name := range r.agentLoader.ListAgents() {
+		a, err := r.agentLoader.LoadAgent(name)
+		if err != nil {
+			continue
+		}
+		// Two runs, so only a compaction problem is reported. Everything else a
+		// runner needs may legitimately be missing at construction time, and
+		// failing on that here would refuse configurations that work.
+		base := runner.Config{
+			AppName:         name,
+			Agent:           a,
+			SessionService:  r.sessionService,
+			MemoryService:   r.memoryService,
+			ArtifactService: r.artifactService,
+			PluginConfig:    r.pluginConfig,
+		}
+		if _, err := runner.New(base); err != nil {
+			continue
+		}
+		withCompaction := base
+		withCompaction.EventsCompactionConfig = r.eventsCompactionConfig
+		if _, err := runner.New(withCompaction); err != nil {
+			return fmt.Errorf("EventsCompactionConfig cannot serve app %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
 func (r *RetriableRunner) RunAgent(ctx context.Context, appName, userID, messageContent string) ([]*session.Event, error) {
 	// One session per delivery. Retries of that delivery reuse it, so a
 	// throttled message accumulates invocations rather than starting over.

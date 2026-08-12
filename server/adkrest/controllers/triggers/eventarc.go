@@ -42,12 +42,16 @@ type EventarcController struct {
 // these constructors are in a released API. Use
 // [NewEventarcControllerWithOptions] to pass options.
 func NewEventarcController(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig) *EventarcController {
-	return NewEventarcControllerWithOptions(sessionService, agentLoader, memoryService, artifactService, pluginConfig, triggerConfig)
+	// No options, so nothing that can be rejected. The error return exists for
+	// the WithOptions form, which can be handed a configuration that cannot
+	// serve the apps behind this controller.
+	c, _ := NewEventarcControllerWithOptions(sessionService, agentLoader, memoryService, artifactService, pluginConfig, triggerConfig)
+	return c
 }
 
 // NewEventarcControllerWithOptions is [NewEventarcController] with optional settings,
 // such as [WithEventsCompactionConfig].
-func NewEventarcControllerWithOptions(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig, opts ...ControllerOption) *EventarcController {
+func NewEventarcControllerWithOptions(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig, opts ...ControllerOption) (*EventarcController, error) {
 	retriable := &RetriableRunner{
 		sessionService:  sessionService,
 		agentLoader:     agentLoader,
@@ -64,10 +68,13 @@ func NewEventarcControllerWithOptions(sessionService session.Service, agentLoade
 		}
 		opt(retriable)
 	}
+	if err := retriable.validateCompaction(); err != nil {
+		return nil, err
+	}
 	return &EventarcController{
 		runner:    retriable,
 		semaphore: make(chan struct{}, triggerConfig.MaxConcurrentRuns),
-	}
+	}, nil
 }
 
 // EventarcTriggerHandler handles the Eventarc trigger endpoint.

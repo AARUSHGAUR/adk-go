@@ -27,6 +27,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/adkrest"
 	"google.golang.org/adk/v2/session"
@@ -240,5 +241,35 @@ func TestNewServerRejectsInvalidCompactionConfig(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "EventsCompactionConfig") {
 		t.Errorf("error %q does not name the offending field", err)
+	}
+}
+
+// TestRESTCompaction_StartupRejectsAConfigItCannotServe pins that a compaction
+// config the server cannot actually run is refused at construction.
+//
+// NewServer's own comment says it validates here so a bad config cannot "start
+// cleanly and then fail every request with a 500 that names nothing the
+// operator can act on", and that is exactly what happened: Validate() checks
+// the config's shape on its own, and a config with no Summarizer is
+// well-shaped. Over a root agent that is not an LLM agent there is no model to
+// build the default summarizer from, so every request 500'd.
+func TestRESTCompaction_StartupRejectsAConfigItCannotServe(t *testing.T) {
+	// A workflow agent has no model of its own.
+	root, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "wf_app"}})
+	if err != nil {
+		t.Fatalf("sequentialagent.New() error = %v", err)
+	}
+
+	_, err = adkrest.NewServer(adkrest.ServerConfig{
+		SessionService: session.InMemoryService(),
+		AgentLoader:    agent.NewSingleLoader(root),
+		// Well-shaped, and unserveable: no Summarizer and no model to make one.
+		EventsCompactionConfig: &compaction.Config{CompactionInterval: 2},
+	})
+	if err == nil {
+		t.Fatal("NewServer() accepted a compaction config that cannot serve its only app")
+	}
+	if !strings.Contains(err.Error(), "wf_app") {
+		t.Errorf("error %q does not name the app the operator has to fix", err)
 	}
 }

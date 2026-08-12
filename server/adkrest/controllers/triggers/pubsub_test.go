@@ -205,7 +205,7 @@ func TestPubSubTriggerSurvivesACompactionFailure(t *testing.T) {
 	testAgent := createMockAgent(t, nil, &runCount, nil)
 	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
 
-	apiController := triggers.NewPubSubControllerWithOptions(
+	apiController, err := triggers.NewPubSubControllerWithOptions(
 		sessionService, agent.NewSingleLoader(testAgent), nil, nil,
 		runner.PluginConfig{}, defaultTriggerConfig,
 		triggers.WithEventsCompactionConfig(&compaction.Config{
@@ -213,6 +213,9 @@ func TestPubSubTriggerSurvivesACompactionFailure(t *testing.T) {
 			Summarizer:         failingSummarizer{},
 		}),
 	)
+	if err != nil {
+		t.Fatalf("NewPubSubControllerWithOptions() error = %v", err)
+	}
 
 	reqObj := models.PubSubTriggerRequest{
 		Message:      models.PubSubMessage{Data: []byte(base64.StdEncoding.EncodeToString([]byte("Hello agent")))},

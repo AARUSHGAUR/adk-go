@@ -41,12 +41,16 @@ type PubSubController struct {
 // these constructors are in a released API. Use
 // [NewPubSubControllerWithOptions] to pass options.
 func NewPubSubController(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig) *PubSubController {
-	return NewPubSubControllerWithOptions(sessionService, agentLoader, memoryService, artifactService, pluginConfig, triggerConfig)
+	// No options, so nothing that can be rejected. The error return exists for
+	// the WithOptions form, which can be handed a configuration that cannot
+	// serve the apps behind this controller.
+	c, _ := NewPubSubControllerWithOptions(sessionService, agentLoader, memoryService, artifactService, pluginConfig, triggerConfig)
+	return c
 }
 
 // NewPubSubControllerWithOptions is [NewPubSubController] with optional settings,
 // such as [WithEventsCompactionConfig].
-func NewPubSubControllerWithOptions(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig, opts ...ControllerOption) *PubSubController {
+func NewPubSubControllerWithOptions(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig, opts ...ControllerOption) (*PubSubController, error) {
 	retriable := &RetriableRunner{
 		sessionService:  sessionService,
 		agentLoader:     agentLoader,
@@ -63,10 +67,13 @@ func NewPubSubControllerWithOptions(sessionService session.Service, agentLoader 
 		}
 		opt(retriable)
 	}
+	if err := retriable.validateCompaction(); err != nil {
+		return nil, err
+	}
 	return &PubSubController{
 		runner:    retriable,
 		semaphore: make(chan struct{}, triggerConfig.MaxConcurrentRuns),
-	}
+	}, nil
 }
 
 // PubSubTriggerHandler handles the PubSub trigger endpoint.

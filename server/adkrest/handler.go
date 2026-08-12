@@ -34,14 +34,67 @@ import (
 	"google.golang.org/adk/v2/session/compaction"
 )
 
+// validateCompactionAgainstAgents reports whether the compaction config can
+// actually serve every app this server knows about.
+//
+// A dry run of runner.New per app rather than a reimplementation of its checks:
+// resolving the default summarizer needs the root agent's model, and a copy of
+// that reasoning here would drift from the one the requests use. Constructing a
+// runner does no I/O.
+func validateCompactionAgainstAgents(cfg ServerConfig) error {
+	if cfg.EventsCompactionConfig == nil {
+		return nil
+	}
+	if err := cfg.EventsCompactionConfig.Validate(); err != nil {
+		return fmt.Errorf("invalid EventsCompactionConfig: %w", err)
+	}
+	if cfg.AgentLoader == nil {
+		return nil
+	}
+	for _, name := range cfg.AgentLoader.ListAgents() {
+		a, err := cfg.AgentLoader.LoadAgent(name)
+		if err != nil {
+			// Not this function's business: an app that cannot be loaded fails
+			// its own requests with an error that says so.
+			continue
+		}
+		// Two runs, so only a compaction problem is reported. Everything else a
+		// runner needs may legitimately be missing at construction time, and
+		// failing on that here would refuse configurations that work.
+		base := runner.Config{
+			AppName:         name,
+			Agent:           a,
+			SessionService:  cfg.SessionService,
+			MemoryService:   cfg.MemoryService,
+			ArtifactService: cfg.ArtifactService,
+			PluginConfig:    cfg.PluginConfig,
+		}
+		if _, err := runner.New(base); err != nil {
+			continue
+		}
+		withCompaction := base
+		withCompaction.EventsCompactionConfig = cfg.EventsCompactionConfig
+		if _, err := runner.New(withCompaction); err != nil {
+			return fmt.Errorf("EventsCompactionConfig cannot serve app %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // NewServer creates a new ADK REST API server which implements [http.Handler] interface.
 func NewServer(cfg ServerConfig) (*Server, error) {
 	// Validated here rather than left to the first request. A compaction config
 	// is rejected inside runner.New, which this server calls per request, so an
 	// invalid one would otherwise start cleanly and then fail every request
 	// with a 500 that names nothing the operator can act on.
-	if err := cfg.EventsCompactionConfig.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid EventsCompactionConfig: %w", err)
+	//
+	// Against the agents, not just the shape. Validate() only checks the config
+	// on its own, and the failure operators actually hit is a config with no
+	// Summarizer over a root agent that is not an LLM agent, which is perfectly
+	// well-shaped and 500s every request. Building a runner is the same code
+	// path the request takes, so this cannot drift from it.
+	if err := validateCompactionAgainstAgents(cfg); err != nil {
+		return nil, err
 	}
 
 	debugTelemetry, err := services.NewDebugTelemetryWithConfig(&services.DebugTelemetryConfig{
