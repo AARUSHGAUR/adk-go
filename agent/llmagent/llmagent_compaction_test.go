@@ -36,17 +36,30 @@ import (
 	"google.golang.org/adk/v2/tool/functiontool"
 )
 
+// minCassetteBytes is the floor below which a cassette cannot hold a recorded
+// conversation. The header alone is a few dozen bytes and a real recording here
+// is tens of kilobytes, so anything under this is a stub from a failed record.
+const minCassetteBytes = 1024
+
 // TestCompactionE2E drives a real model through enough turns to trigger a
 // sliding-window compaction, then checks that the next prompt is both smaller
 // and still accepted.
 //
-// What a passing run does and does not establish. Replay keys on exact request
-// bytes, so this proves the recorded model accepted the compacted prompt at the
-// time it was recorded. It does not re-validate anything against a live API: a
-// structural defect introduced later surfaces as a cassette miss, not as an API
-// rejection, and the miss aborts the run before any assertion below is reached.
-// The structural properties are therefore asserted here directly and offline,
-// over the prompts the agent actually sent.
+// What a passing run establishes, stated narrowly because replay keys on exact
+// request bytes and it is easy to read more into a green test than it holds:
+//
+//   - A real model accepted a compacted prompt, at the time the cassette was
+//     recorded. Not since.
+//   - A summary and live tool traffic coexisted in one accepted prompt.
+//   - Offline, over the prompts the agent actually sent: the summary replaced
+//     the turns it covers, the covered turns are still in the session, and no
+//     prompt carries a function response without its call.
+//
+// What it does not establish is that anything still works against a live API. A
+// structural defect introduced later changes the prompt bytes, so it arrives as
+// a cassette miss rather than an API rejection. The offline assertions run
+// before that miss is reported, so the failure says which property broke rather
+// than only that the bytes moved.
 //
 // The fourth turn calls a tool after the compaction point on purpose, so the
 // prompt it produces carries a summary and function traffic together. Without
@@ -97,10 +110,18 @@ func TestCompactionE2E(t *testing.T) {
 	// goes ahead regardless, since that is the run that creates the file.
 	trace := filepath.Join("testdata", t.Name()+".httprr")
 	if recording, _ := httprr.Recording(trace); !recording {
-		if _, err := os.Stat(trace); err != nil {
-			t.Fatalf("no cassette at %s: %v. It is committed, so this means it was lost or renamed. "+
-				"Re-record with: GOOGLE_API_KEY=... go test ./agent/llmagent/ "+
-				"-run '^TestCompactionE2E$' -httprecord='TestCompactionE2E\\.httprr$' -count=1 -v", trace, err)
+		const reRecord = "Re-record with: GOOGLE_API_KEY=... go test ./agent/llmagent/ " +
+			"-run '^TestCompactionE2E$' -httprecord='TestCompactionE2E\\.httprr$' -count=1 -v"
+		info, err := os.Stat(trace)
+		if err != nil {
+			t.Fatalf("no cassette at %s: %v. It is committed, so this means it was lost or renamed. %s", trace, err, reRecord)
+		}
+		// A failed or interrupted re-record leaves the header and nothing else.
+		// Accepting it meant dying eighty lines later on a replay miss, with a
+		// message that never mentioned the cassette.
+		if info.Size() < minCassetteBytes {
+			t.Fatalf("the cassette at %s is %d bytes, too small to hold a conversation. "+
+				"A re-record that failed partway leaves a header-only stub. %s", trace, info.Size(), reRecord)
 		}
 	}
 
@@ -173,12 +194,37 @@ func TestCompactionE2E(t *testing.T) {
 		"Now check the weather in Oslo.",
 	}
 	answers := make([][]string, len(turns))
+	var runErr error
+	failedTurn := -1
 	for i, turn := range turns {
 		answer, err := testutil.CollectTextParts(r.Run(t, sessionID, turn))
 		if err != nil {
-			t.Fatalf("turn %d (%q) failed: %v", i+1, turn, err)
+			runErr, failedTurn = err, i
+			break
 		}
 		answers[i] = answer
+	}
+
+	// The offline checks run on whatever was captured, before any run failure
+	// is reported. A compaction defect changes the bytes of the prompt, so it
+	// reaches this test as a replay miss, and failing on that first put every
+	// assertion in this file behind an error that says only "cached HTTP
+	// response not found". The checks below are what say which defect it was.
+	//
+	// This one is weaker than it looks: the framework's own pairing guard
+	// rejects an orphaned response before a prompt is ever sent, so it catches
+	// a defect only in the window where the prompt is assembled but not yet
+	// validated. Running it is still the difference between a diagnosis and a
+	// byte mismatch.
+	mu.Lock()
+	captured := append([][]*genai.Content(nil), prompts...)
+	mu.Unlock()
+	for i, p := range captured {
+		assertNoOrphanFunctionResponses(t, i, p)
+	}
+
+	if runErr != nil {
+		t.Fatalf("turn %d (%q) failed: %v", failedTurn+1, turns[failedTurn], runErr)
 	}
 
 	// A compaction must have landed. Without this the rest proves nothing.
@@ -228,6 +274,25 @@ func TestCompactionE2E(t *testing.T) {
 		t.Errorf("final prompt still contains the compacted second turn %q:\n%s", turns[1], final)
 	}
 
+	// Compacting rather than truncating, asserted against the store rather than
+	// inferred from the prompt. Nothing here distinguished "absent from the
+	// prompt" from "absent from the session" before: a compaction patched to
+	// drop the covered events outright took the session from 14 events to 2,
+	// lost every raw turn, and this test still passed.
+	//
+	// The session is the audit record. A summary standing in for turns inside a
+	// prompt is the feature, and those same turns disappearing from storage is
+	// data loss.
+	if len(events) < len(turns) {
+		t.Errorf("the session holds %d events for %d turns, so history was deleted rather than compacted",
+			len(events), len(turns))
+	}
+	for _, want := range turns {
+		if !sessionHoldsText(events, want) {
+			t.Errorf("turn %q is no longer in the session: compaction must leave history intact", want)
+		}
+	}
+
 	// The point of compacting rather than truncating: the fact survives into the
 	// summary and the model can still answer from it. This is turn 3
 	// specifically, the one that asks, rather than whichever turn happens to be
@@ -246,23 +311,69 @@ func TestCompactionE2E(t *testing.T) {
 	// turns asserted above are the visible part of that, but the range is the
 	// contract, so it is checked directly.
 	covered := summaries[0].Actions.Compaction
+
+	// Searched with the summary removed. The summary is in the prompt on
+	// purpose and it paraphrases the turns it covers, so any overlap of wording
+	// reads as a covered turn surviving. The recorded summary says "The current
+	// weather in Zurich is sunny." against a covered "The weather in Zurich is
+	// currently sunny.", which is one word's ordering away from failing this
+	// test for no reason on the next re-record.
+	outsideSummary := strings.ReplaceAll(final, strings.TrimSpace(summaryText), "")
+
+	// hasCompaction, not IsCompactionEvent: the latter answers "is there a
+	// usable summary here", which its own doc says is a different question from
+	// "is this bookkeeping". Filtering on it left the compacted tool traffic
+	// unexamined, which is exactly the pair the range is most likely to break.
+	checked := 0
 	for _, ev := range events {
-		if compaction.IsCompactionEvent(ev) || ev.Timestamp.Before(covered.StartTimestamp) || ev.Timestamp.After(covered.EndTimestamp) {
+		if ev.Actions.Compaction != nil ||
+			ev.Timestamp.Before(covered.StartTimestamp) || ev.Timestamp.After(covered.EndTimestamp) {
 			continue
 		}
-		for _, part := range utils.Content(ev).Parts {
-			if part == nil || strings.TrimSpace(part.Text) == "" {
+		content := utils.Content(ev)
+		if content == nil {
+			// A covered event with no content used to take the package binary
+			// down with a nil dereference here.
+			continue
+		}
+		for _, part := range content.Parts {
+			if part == nil {
 				continue
 			}
-			if strings.Contains(final, strings.TrimSpace(part.Text)) {
-				t.Errorf("event %q is inside the compacted range but its text is still in the final prompt: %q", ev.ID, part.Text)
+			if text := strings.TrimSpace(part.Text); text != "" {
+				checked++
+				if strings.Contains(outsideSummary, text) {
+					t.Errorf("event %q is covered by the summary but its text is still in the final prompt: %q", ev.ID, part.Text)
+				}
+			}
+			// The tool traffic, matched by call ID rather than by text. Two of
+			// the six covered events are a call and its response, and neither
+			// carries text, so a text-only sweep never looked at them.
+			if fc := part.FunctionCall; fc != nil && fc.ID != "" {
+				checked++
+				if promptMentionsCallID(prompts[len(prompts)-1], fc.ID) {
+					t.Errorf("event %q is covered but its function call %q is still in the final prompt", ev.ID, fc.ID)
+				}
+			}
+			if fr := part.FunctionResponse; fr != nil && fr.ID != "" {
+				checked++
+				if promptMentionsCallID(prompts[len(prompts)-1], fr.ID) {
+					t.Errorf("event %q is covered but its function response %q is still in the final prompt", ev.ID, fr.ID)
+				}
 			}
 		}
 	}
+	// Without a floor this loop goes quiet rather than failing: blanking the
+	// covered events' parts left it making zero comparisons and the test still
+	// passed. Six events are covered in the recording and four of them carry
+	// something to compare, so anything below that means the sweep stopped
+	// looking rather than stopped finding.
+	if checked < 4 {
+		t.Errorf("the covered-range sweep made %d comparisons, want at least 4: it is not examining what it claims to", checked)
+	}
 
 	withSummaryAndTools := 0
-	for i, p := range prompts {
-		assertNoOrphanFunctionResponses(t, i, p)
+	for _, p := range prompts {
 		if promptHasFunctionTraffic(p) && strings.Contains(promptTextOf(p), strings.TrimSpace(summaryText)) {
 			withSummaryAndTools++
 		}
@@ -388,4 +499,46 @@ func promptTextOf(contents []*genai.Content) string {
 		}
 	}
 	return b.String()
+}
+
+// sessionHoldsText reports whether any stored event still carries want.
+//
+// Read against the session rather than the prompt, so it answers "is the
+// history still there" rather than "was it shown to the model", which is the
+// distinction between compacting and truncating.
+func sessionHoldsText(events []*session.Event, want string) bool {
+	for _, ev := range events {
+		content := utils.Content(ev)
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part != nil && strings.Contains(part.Text, want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// promptMentionsCallID reports whether any part of the prompt carries a
+// function call or response with the given ID.
+func promptMentionsCallID(contents []*genai.Content, id string) bool {
+	for _, c := range contents {
+		if c == nil {
+			continue
+		}
+		for _, part := range c.Parts {
+			if part == nil {
+				continue
+			}
+			if fc := part.FunctionCall; fc != nil && fc.ID == id {
+				return true
+			}
+			if fr := part.FunctionResponse; fr != nil && fr.ID == id {
+				return true
+			}
+		}
+	}
+	return false
 }
