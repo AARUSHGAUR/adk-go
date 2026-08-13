@@ -20,21 +20,28 @@ Egress auth stays free along the way: an MCP server on `*.googleapis.com` inheri
 ## Workflow
 
 ```mermaid
-graph LR
-    User[User]
-    subgraph Registry["Agent Registry"]
-        C["AllMCPServers()<br/>declared tool metadata"]
-    end
-    Pick{"declares<br/>REGISTRY_TOOL?"}
-    subgraph App["ADK application"]
-        Hub["LlmAgent: registry_hub"]
-        TS["tool.Toolset"]
-        Hub --> TS
-    end
-    C --> Pick
-    Pick -- "the winner" --> TS
-    User --> Hub
-    TS -. "MCP over HTTP<br/>(ADC inherited)" .-> Srv[(MCP server)]
+sequenceDiagram
+    actor User
+    participant Main as sample
+    participant Reg as Agent Registry
+    participant Hub as LlmAgent registry_hub
+    participant Srv as MCP server
+
+    Note over Main,Reg: startup
+    Main->>Reg: AllMCPServers()
+    Reg-->>Main: servers and their declared tools
+    Main->>Main: first declaring REGISTRY_TOOL wins
+    Main->>Reg: MCPToolset(winner)
+    Reg-->>Main: tool.Toolset, endpoint resolved, not connected
+    Main->>Hub: llmagent.New with that toolset
+
+    Note over User,Srv: first turn
+    User->>Main: prompt on the console
+    Main->>Hub: runner.Run
+    Hub->>Srv: MCP over HTTP, ADC inherited
+    Srv-->>Hub: live tool list, then results
+    Hub-->>Main: events
+    Main-->>User: answer
 ```
 
 1. Scan the catalog for every server whose declared `Tools` include the wanted name.
