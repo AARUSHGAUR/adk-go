@@ -481,9 +481,12 @@ func UnwrapSession(s session.Session) session.Session {
 //
 // The range says what a summary stands in for and the exclusion list says which
 // events inside it were left out, because window selection filters events out
-// of the middle of its own span. An ID that names nothing excludes nothing,
-// which is the safe direction: coverage falls back to the plain interval rather
-// than collapsing to nothing.
+// of the middle of its own span. A reference that names nothing excludes
+// nothing, and that is the unsafe direction rather than the safe one: coverage
+// is the range minus the exclusions, so an event whose hole stops matching
+// becomes covered by a summary that never described it, and is dropped. A
+// reference that names too much only leaves an extra event raw. Over-naming is
+// the direction to prefer, and the producer errs that way deliberately.
 func inRange(ev *session.Event, rng *session.EventCompaction) bool {
 	if ev == nil || rng == nil {
 		return false

@@ -15,6 +15,7 @@
 package compactioninternal
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -250,5 +251,50 @@ func TestNewSummaryEventDropsThoughtsFromAMixedSummary(t *testing.T) {
 	}
 	if stored[0].Text != "The user asked about the weather in Zurich." {
 		t.Errorf("stored text = %q, want the prose part", stored[0].Text)
+	}
+}
+
+// TestNewSummaryEventRecordsAHoleThatCollidesWithTheWindow pins that window
+// membership is decided by identity, not by the reference key.
+//
+// Two events of one invocation can share a timestamp, which the key cannot tell
+// apart, and EventRef's own documentation says so. When one of the pair is in
+// the window and the other is not, reading membership from the key said the
+// second was summarized as well. No hole was recorded, so the range covered it,
+// and a summary that never saw it stood in for it: conversation deleted, which
+// is the failure the exclusion list exists to prevent.
+//
+// Recording the hole costs the over-naming case instead. The reference matches
+// both events of the pair, so the one that was summarized is also left raw
+// beside a summary of it. That is visible and recoverable where the deletion is
+// not.
+func TestNewSummaryEventRecordsAHoleThatCollidesWithTheWindow(t *testing.T) {
+	t.Parallel()
+
+	inWindow := textEvent("a", "inv1", 1, "summarized")
+	collides := textEvent("x", "inv1", 1, "never summarized, same invocation and timestamp")
+	tail := modelTextEvent("b", "inv1", 3, "a1")
+
+	window := []*session.Event{inWindow, tail}
+	all := []*session.Event{collides, inWindow, tail}
+
+	summary, err := newSummaryEvent(window, all, genai.NewContentFromText("summary", "model"), nil)
+	if err != nil {
+		t.Fatalf("newSummaryEvent() error = %v", err)
+	}
+	rec := summary.Actions.Compaction
+	if len(rec.ExcludedEvents) != 1 {
+		t.Fatalf("ExcludedEvents = %v, want one hole for the event no summary covers", rec.ExcludedEvents)
+	}
+	want := session.EventRef{InvocationID: "inv1", Timestamp: at(1)}
+	if rec.ExcludedEvents[0] != want {
+		t.Errorf("ExcludedEvents[0] = %v, want %v", rec.ExcludedEvents[0], want)
+	}
+
+	// End to end: the event that was never summarized survives into the prompt.
+	summary.ID, summary.Timestamp = "s1", at(4)
+	got := ids(Apply(append(all, summary)))
+	if !slices.Contains(got, "x") {
+		t.Errorf("prompt = %v, want it to still hold %q, which no summary stands in for", got, "x")
 	}
 }

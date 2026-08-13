@@ -308,13 +308,18 @@ type EventCompaction struct {
 	// empty where a membership list would carry one entry per event of the
 	// conversation, for ever, recopied onto every rolling summary.
 	//
-	// It is also safe to be imprecise about, which is why it is keyed on the
-	// invocation and timestamp rather than the event ID. Event IDs do not
-	// survive every storage backend: the Vertex AI service replaces them with a
-	// server resource name on read. A key that fails to match excludes nothing,
-	// so coverage falls back to the plain range, and a key that matches too
-	// much leaves an extra event raw beside a summary of it. Both are visible
-	// and recoverable, where under-covering silently deletes conversation.
+	// It is keyed on the invocation and timestamp rather than the event ID
+	// because event IDs do not survive every storage backend: the Vertex AI
+	// service replaces them with a server resource name on read.
+	//
+	// Imprecision here is not symmetric. A key matching too much leaves an
+	// extra event raw beside a summary of it, which is visible and recoverable.
+	// A key that fails to match does not fall back to anything: coverage is the
+	// range minus the exclusions, so the event it was protecting becomes
+	// covered by a summary that never described it, and is dropped from every
+	// later prompt. Producers must therefore err towards naming a hole too
+	// broadly, and a backend that does not round-trip these timestamps exactly
+	// will silently delete conversation.
 	ExcludedEvents []EventRef `json:"excludedEvents,omitempty"`
 }
 

@@ -122,13 +122,27 @@ func newSummaryEvent(events, all []*session.Event, summary *genai.Content, usage
 	// records nothing here at all.
 	//
 	// Referred to by invocation and timestamp, which survive every backend,
-	// rather than by event ID, which the Vertex AI service replaces on read. A
-	// reference that matches nothing excludes nothing and the range stands on
-	// its own, and one that matches two events leaves an extra event raw. Both
-	// are recoverable where under-covering is not.
-	summarized := make(map[string]struct{}, len(events))
+	// rather than by event ID, which the Vertex AI service replaces on read.
+	//
+	// Being imprecise about a reference is not symmetric, and not safe in both
+	// directions. A reference matching two events of one invocation that share
+	// a timestamp leaves an extra event raw beside a summary of it, which is
+	// visible and recoverable. A reference matching nothing does not fall back
+	// to anything: coverage is the range minus the exclusions, so a hole that
+	// fails to match stops being a hole, and the event it named is dropped in
+	// favour of a summary that never described it. Over-naming is the direction
+	// to prefer, and under-naming is the one that loses conversation.
+	//
+	// Window membership is therefore decided by identity rather than by the
+	// same key. The window holds the very pointers the session holds, so this
+	// is exact, where the key is not: an event outside the window colliding
+	// with one inside it used to be read as summarized and recorded as no hole
+	// at all, which is the under-naming case above. The synthetic seed is the
+	// one window element absent from the session, and it matches nothing here,
+	// which is correct because it stands for events rather than being one.
+	summarized := make(map[*session.Event]struct{}, len(events))
 	for _, ev := range events {
-		summarized[refKey(ev)] = struct{}{}
+		summarized[ev] = struct{}{}
 	}
 
 	// A window rolling up an earlier summary carries it as its first element,
@@ -164,10 +178,10 @@ func newSummaryEvent(events, all []*session.Event, summary *genai.Content, usage
 		if ev.Timestamp.Before(start) || ev.Timestamp.After(end) {
 			continue
 		}
-		k := refKey(ev)
-		if _, ok := summarized[k]; ok {
+		if _, ok := summarized[ev]; ok {
 			continue
 		}
+		k := refKey(ev)
 		if _, ok := seen[k]; ok {
 			continue
 		}
