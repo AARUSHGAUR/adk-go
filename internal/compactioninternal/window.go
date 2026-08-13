@@ -148,7 +148,7 @@ func isCompactionSubsumed(i int, rng *session.EventCompaction, events []*session
 			continue
 		}
 		if o.StartTimestamp.Before(rng.StartTimestamp) || o.EndTimestamp.After(rng.EndTimestamp) ||
-			len(o.ExcludedEventIDs) < len(rng.ExcludedEventIDs) || j > i {
+			len(o.ExcludedEvents) < len(rng.ExcludedEvents) || j > i {
 			return true
 		}
 	}
@@ -436,9 +436,9 @@ func coversAllOf(a, b *session.EventCompaction) bool {
 	if a.StartTimestamp.After(b.StartTimestamp) || a.EndTimestamp.Before(b.EndTimestamp) {
 		return false
 	}
-	for _, id := range a.ExcludedEventIDs {
+	for _, ref := range a.ExcludedEvents {
 		// An event a leaves out is fine only if b leaves it out too.
-		if !slices.Contains(b.ExcludedEventIDs, id) {
+		if !slices.Contains(b.ExcludedEvents, ref) {
 			return false
 		}
 	}

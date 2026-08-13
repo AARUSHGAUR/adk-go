@@ -492,7 +492,7 @@ func TestApplyKeepsAnEventTheSummaryDidNotCover(t *testing.T) {
 
 	// The summary spans a..d but stands in only for a and d. Whatever kept b
 	// and c out of the window, they were handed to no summarizer.
-	summary := compactionEvent("s1", 9, 1, 4, "summary of a and d", "b", "c")
+	summary := compactionEvent("s1", 9, 1, 4, "summary of a and d", excl("inv1", 2), excl("inv1", 3))
 	events := []*session.Event{
 		textEvent("a", "inv1", 1, "q1"),
 		textEvent("b", "inv1", 2, "sibling branch"),
@@ -521,13 +521,20 @@ func TestApplyKeepsAnEventTiedToTheWindowHead(t *testing.T) {
 		textEvent("x", "inv1", 1, "tied to the head, never summarized"),
 		textEvent("a", "inv1", 1, "q1"),
 		modelTextEvent("b", "inv1", 3, "a1"),
-		compactionEvent("s1", 9, 1, 3, "summary of a and b", "x"),
+		compactionEvent("s1", 9, 1, 3, "summary of a and b", excl("inv1", 1)),
 	}
 
 	// x keeps its place ahead of the summary, which is emitted where the first
 	// event it does cover used to sit.
+	//
+	// "a" is kept too, and that is the cost of referring to an excluded event
+	// by invocation and timestamp rather than by ID: the reference names both
+	// events of the tied pair. Over-excluding leaves an event raw beside a
+	// summary of it, which is visible and recoverable, and it buys a key that
+	// survives a backend that reassigns event IDs. Under-excluding would delete
+	// x, which is the failure this whole model exists to remove.
 	got := ids(Apply(events))
-	if diff := cmp.Diff([]string{"x", "s1"}, got); diff != "" {
+	if diff := cmp.Diff([]string{"x", "a", "s1"}, got); diff != "" {
 		t.Errorf("prompt events mismatch (-want +got):\n%s", diff)
 	}
 }

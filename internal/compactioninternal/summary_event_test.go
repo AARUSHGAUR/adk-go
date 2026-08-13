@@ -199,8 +199,8 @@ func TestNewSummaryEventBoundsAnOutOfOrderWindow(t *testing.T) {
 			c.StartTimestamp, c.EndTimestamp, time.Unix(1, 0), time.Unix(9, 0))
 	}
 	// Every event in the window was summarized, so there are no holes to name.
-	if len(c.ExcludedEventIDs) != 0 {
-		t.Errorf("ExcludedEventIDs = %v, want none: the window has no holes", c.ExcludedEventIDs)
+	if len(c.ExcludedEvents) != 0 {
+		t.Errorf("ExcludedEventIDs = %v, want none: the window has no holes", c.ExcludedEvents)
 	}
 }
 

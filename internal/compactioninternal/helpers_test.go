@@ -110,7 +110,7 @@ func confirmationEvent(id, invocationID string, ts int, callID string) *session.
 // the stream and covers the inclusive range [start, end].
 // compactionEvent builds a stored record covering [start, end] except for
 // excludedIDs, which is how a real one records the holes window selection left.
-func compactionEvent(id string, ts, start, end int, summary string, excludedIDs ...string) *session.Event {
+func compactionEvent(id string, ts, start, end int, summary string, excluded ...session.EventRef) *session.Event {
 	return &session.Event{
 		ID:           id,
 		InvocationID: "compaction-" + id,
@@ -121,7 +121,7 @@ func compactionEvent(id string, ts, start, end int, summary string, excludedIDs 
 				StartTimestamp:   at(start),
 				EndTimestamp:     at(end),
 				CompactedContent: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: summary}}},
-				ExcludedEventIDs: excludedIDs,
+				ExcludedEvents:   excluded,
 			},
 		},
 	}
@@ -192,4 +192,9 @@ func tailRetentionStored(ctx context.Context, cfg *compaction.Config, sess sessi
 	ev, finish, err := TailRetention(ctx, cfg, sess, scope, estimate, progress)
 	finish(err, "")
 	return ev, err
+}
+
+// excl is a shorthand for the reference a test fixture excludes.
+func excl(invocationID string, ts int) session.EventRef {
+	return session.EventRef{InvocationID: invocationID, Timestamp: at(ts)}
 }

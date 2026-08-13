@@ -294,7 +294,7 @@ type EventCompaction struct {
 	// prompt.
 	CompactedContent *genai.Content `json:"compactedContent"`
 
-	// ExcludedEventIDs are the events inside the range above that this summary
+	// ExcludedEvents are the events inside the range above that this summary
 	// does NOT stand in for. Everything else in the range is covered.
 	//
 	// The range alone was not enough. Choosing a window filters events out of
@@ -306,14 +306,16 @@ type EventCompaction struct {
 	// Recording the holes rather than the membership keeps this bounded. Holes
 	// are rare, none at all in a single-agent conversation, so this is normally
 	// empty where a membership list would carry one entry per event of the
-	// conversation, for ever, recopied on every rolling summary.
+	// conversation, for ever, recopied onto every rolling summary.
 	//
-	// It also fails in the safe direction. An ID that does not match anything,
-	// which is what a storage backend that reassigns event IDs leaves behind,
-	// excludes nothing and the range stands on its own. The inverse list would
-	// match nothing, cover nothing, and leave compaction paying for summaries
-	// that never shrink a prompt.
-	ExcludedEventIDs []string `json:"excludedEventIds,omitempty"`
+	// It is also safe to be imprecise about, which is why it is keyed on the
+	// invocation and timestamp rather than the event ID. Event IDs do not
+	// survive every storage backend: the Vertex AI service replaces them with a
+	// server resource name on read. A key that fails to match excludes nothing,
+	// so coverage falls back to the plain range, and a key that matches too
+	// much leaves an extra event raw beside a summary of it. Both are visible
+	// and recoverable, where under-covering silently deletes conversation.
+	ExcludedEvents []EventRef `json:"excludedEvents,omitempty"`
 }
 
 // clone returns a deep copy, or nil for a nil receiver.
@@ -328,7 +330,7 @@ func (c *EventCompaction) clone() *EventCompaction {
 		return nil
 	}
 	out := *c
-	out.ExcludedEventIDs = slices.Clone(c.ExcludedEventIDs)
+	out.ExcludedEvents = slices.Clone(c.ExcludedEvents)
 	if c.CompactedContent != nil {
 		content := *c.CompactedContent
 		content.Parts = slices.Clone(c.CompactedContent.Parts)
@@ -342,6 +344,18 @@ func (c *EventCompaction) clone() *EventCompaction {
 		out.CompactedContent = &content
 	}
 	return &out
+}
+
+// EventRef identifies a stored event by fields that survive a storage round
+// trip, for a record that has to refer to an event it does not contain.
+//
+// Not the event ID, which one backend reassigns on read. The pair is not
+// guaranteed unique: two events of one invocation can share a timestamp, and a
+// reference then names both. Callers must therefore only use this where naming
+// one event too many is the harmless direction.
+type EventRef struct {
+	InvocationID string    `json:"invocationId"`
+	Timestamp    time.Time `json:"timestamp"`
 }
 
 // Prefixes for defining session's state scopes

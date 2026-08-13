@@ -16,7 +16,7 @@ package compactioninternal
 
 import (
 	"fmt"
-	"slices"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -121,32 +121,34 @@ func newSummaryEvent(events, all []*session.Event, summary *genai.Content, usage
 	// range is covered, so the common case, a window with no holes in it,
 	// records nothing here at all.
 	//
-	// An event with no ID cannot be named, so it cannot be excluded either. It
-	// therefore reads as covered, which is the same answer the range alone gave
-	// before any of this existed. AppendEvent assigns an ID to anything that
-	// arrives without one, so a stored event reaching here should always have
-	// one to name.
+	// Referred to by invocation and timestamp, which survive every backend,
+	// rather than by event ID, which the Vertex AI service replaces on read. A
+	// reference that matches nothing excludes nothing and the range stands on
+	// its own, and one that matches two events leaves an extra event raw. Both
+	// are recoverable where under-covering is not.
 	summarized := make(map[string]struct{}, len(events))
 	for _, ev := range events {
-		if ev.ID != "" {
-			summarized[ev.ID] = struct{}{}
-		}
+		summarized[refKey(ev)] = struct{}{}
 	}
-	var excluded []string
+	var excluded []session.EventRef
+	seen := make(map[string]struct{})
 	for _, ev := range all {
-		if ev == nil || ev.ID == "" || hasCompaction(ev) {
+		if ev == nil || hasCompaction(ev) {
 			continue
 		}
 		if ev.Timestamp.Before(start) || ev.Timestamp.After(end) {
 			continue
 		}
-		if _, ok := summarized[ev.ID]; ok {
+		k := refKey(ev)
+		if _, ok := summarized[k]; ok {
 			continue
 		}
-		excluded = append(excluded, ev.ID)
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		excluded = append(excluded, session.EventRef{InvocationID: ev.InvocationID, Timestamp: ev.Timestamp})
 	}
-	slices.Sort(excluded)
-	excluded = slices.Compact(excluded)
 
 	return &session.Event{
 		// Authored as "user" because a summary is injected context rather than
@@ -160,7 +162,7 @@ func newSummaryEvent(events, all []*session.Event, summary *genai.Content, usage
 				StartTimestamp:   start,
 				EndTimestamp:     end,
 				CompactedContent: &content,
-				ExcludedEventIDs: excluded,
+				ExcludedEvents:   excluded,
 			},
 		},
 		LLMResponse: model.LLMResponse{UsageMetadata: usage},
@@ -214,4 +216,12 @@ func SanitizeSummary(ev *session.Event) bool {
 	content.Parts = kept
 	ev.Actions.Compaction.CompactedContent = &content
 	return true
+}
+
+// refKey is the comparable form of an event's reference.
+func refKey(ev *session.Event) string {
+	if ev == nil {
+		return ""
+	}
+	return ev.InvocationID + "@" + ev.Timestamp.UTC().Format(time.RFC3339Nano)
 }

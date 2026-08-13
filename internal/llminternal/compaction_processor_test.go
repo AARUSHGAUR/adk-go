@@ -16,7 +16,6 @@ package llminternal_test
 
 import (
 	"context"
-	"slices"
 	"testing"
 	"time"
 
@@ -193,8 +192,9 @@ type racingSummarizer struct {
 	svc session.Service
 	t   *testing.T
 
-	// racedID is the ID of the event this summarizer landed mid-call.
-	racedID string
+	// The event this summarizer landed mid-call.
+	racedInvocation string
+	racedTimestamp  time.Time
 }
 
 func (s *racingSummarizer) SummarizeEvents(ctx context.Context, events []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error) {
@@ -214,21 +214,20 @@ func (s *racingSummarizer) SummarizeEvents(ctx context.Context, events []*sessio
 	if err := s.svc.AppendEvent(ctx, other.Session, late); err != nil {
 		s.t.Fatalf("racing AppendEvent() error = %v", err)
 	}
-	s.racedID = late.ID
+	s.racedInvocation, s.racedTimestamp = late.InvocationID, late.Timestamp
 	return genai.NewContentFromText("SUMMARY", "model"), nil, nil
 }
 
-// TestCompactionProcessorDoesNotCoverARacedEvent checks that an event appended
-// by another invocation while a summary was being produced is left out of what
-// that summary stands in for.
+// TestCompactionProcessorDiscardsARacedSummary checks that a summary is thrown
+// away when another invocation appended inside its range while it was being
+// produced.
 //
-// A summary names the events it replaces, so a turn that arrived too late to be
-// summarized is simply not covered and stays raw in the prompt. That is what
-// makes the window between choosing a window and appending the summary safe,
-// which no check could have covered: an event landing in it is not named
-// either. The summary itself is worth keeping, since throwing it away would
-// spend a model call and store nothing.
-func TestCompactionProcessorDoesNotCoverARacedEvent(t *testing.T) {
+// A summary records the holes inside its range, and that list is computed from
+// what the framework could see when it was built. An event that lands
+// afterwards is inside the range and named by nothing, so it reads as covered
+// and prompt assembly drops it, having been summarized by nothing. Discarding
+// costs one wasted model call; keeping it costs a turn of conversation.
+func TestCompactionProcessorDiscardsARacedSummary(t *testing.T) {
 	t.Parallel()
 
 	svc, sess := tailRetentionFixture(t, 4)
@@ -242,16 +241,10 @@ func TestCompactionProcessorDoesNotCoverARacedEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompactionRequestProcessor failed: %v", err)
 	}
-
-	stored := storedCompactions(t, svc)
-	if len(stored) != 1 {
-		t.Fatalf("stored %d compaction events, want 1: the summary is usable and was paid for", len(stored))
+	if summarizer.racedInvocation == "" {
+		t.Fatal("the racing summarizer did not record what it appended")
 	}
-	if summarizer.racedID == "" {
-		t.Fatal("the racing summarizer did not record the ID it appended")
-	}
-	covered := stored[0].Actions.Compaction.ExcludedEventIDs
-	if slices.Contains(covered, summarizer.racedID) {
-		t.Errorf("the summary covers %q, which was appended after its window was chosen and summarized by nothing", summarizer.racedID)
+	if got := len(storedCompactions(t, svc)); got != 0 {
+		t.Errorf("stored %d compaction events, want 0: a summary whose range was raced must be discarded", got)
 	}
 }

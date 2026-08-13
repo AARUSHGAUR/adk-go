@@ -292,15 +292,19 @@ func recoverCompactedFunctionCalls(events, sourceEvents []*session.Event) []*ses
 // RangeRaced reports whether the session gained an event inside summary's range
 // while the summary was being produced.
 //
-// Only a competing compaction counts. A summary names the events it replaces,
-// so an ordinary turn appended by a concurrent invocation while summarizing was
-// in flight is simply not covered: it stays raw in the prompt, which is the
-// right outcome and needs no summary thrown away. That also closes the window
-// between this check and the append, which no check could have covered.
+// Both a competing compaction and an ordinary turn count.
 //
-// A second compaction is different. Two summaries whose ID sets overlap would
-// each stand in for the same turns, so the same content would be materialized
-// twice into one prompt.
+// A summary records the holes inside its range, and that list is computed from
+// what the framework could see when the summary was built. An event a
+// concurrent invocation appends afterwards lands inside the range and is named
+// by nothing, so it reads as covered and prompt assembly drops it, having been
+// summarized by nothing. Naming the members instead of the holes would have
+// made this case safe by omission, at the price of a list that grows with the
+// conversation and a key every backend has to preserve.
+//
+// A second compaction counts for a different reason: two summaries whose
+// ranges meet would each stand in for the same turns, so the same content is
+// materialized twice into one prompt.
 //
 // selectedFrom is the session state the window was chosen from, and latest is a
 // fresh read taken after summarizing. A compaction present in latest but absent
@@ -320,16 +324,28 @@ func RangeRaced(latest, selectedFrom session.Session, summary *session.Event) bo
 	}
 
 	for _, ev := range collect(latest) {
-		if !hasCompaction(ev) {
-			continue
-		}
-		// A compaction counts only if it is new. One already present when the
-		// window was selected is the boundary this summary was built from,
-		// rather than a racer.
+		// Anything already present when the window was selected is what this
+		// summary was built from, rather than a racer.
 		if _, seen := known[ev.ID]; seen {
 			continue
 		}
-		if overlaps(rng, ev.Actions.Compaction) {
+		if hasCompaction(ev) {
+			if overlaps(rng, ev.Actions.Compaction) {
+				return true
+			}
+			continue
+		}
+		if !ev.Timestamp.Before(rng.StartTimestamp) && !ev.Timestamp.After(rng.EndTimestamp) {
+			return true
+		}
+	}
+	return false
+}
+
+// excludes reports whether rng names ev as a hole.
+func excludes(rng *session.EventCompaction, ev *session.Event) bool {
+	for _, ref := range rng.ExcludedEvents {
+		if ref.InvocationID == ev.InvocationID && ref.Timestamp.Equal(ev.Timestamp) {
 			return true
 		}
 	}
@@ -466,5 +482,5 @@ func inRange(ev *session.Event, rng *session.EventCompaction) bool {
 	if ev.Timestamp.Before(rng.StartTimestamp) || ev.Timestamp.After(rng.EndTimestamp) {
 		return false
 	}
-	return !slices.Contains(rng.ExcludedEventIDs, ev.ID)
+	return !excludes(rng, ev)
 }
