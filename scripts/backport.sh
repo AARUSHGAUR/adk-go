@@ -129,11 +129,10 @@ remote_owner() {
 #
 # Workflows do fire here: the `pull_request` triggers in go.yml and apidiff.yml
 # filter on the *base* branch, and v1 is listed. The rule that suppresses
-# workflow runs applies only to PRs opened from inside Actions with the
-# built-in GITHUB_TOKEN; this script runs locally under a human's credentials,
-# so the events are ordinary ones. This check exists to prove that per run
-# rather than assume it, because a backport that cannot show green CI cannot
-# be merged.
+# workflow runs applies only to the built-in GITHUB_TOKEN, which is why the
+# workflow insists on a PAT or App token instead and why running this by hand
+# is fine. Either way it is checked rather than assumed, because a backport
+# that cannot show green CI cannot be merged.
 confirm_checks() {
   local pr="$1"
   local deadline=$((SECONDS + CHECKS_TIMEOUT))
@@ -185,16 +184,24 @@ EOF
 # because they were *not* backported. Matching those would silently drop a real
 # fix from the queue, which is the one failure this tool must not have.
 backported_prs() {
-  local remote="$1" base
+  local remote="$1" base open_titles
   local bullet='^[[:space:]]*\*[[:space:]].*\(#[0-9]+\)[[:space:]]*$'
   base="$(git merge-base "${remote}/${MAIN_BRANCH}" "${remote}/${V1_BRANCH}")"
+
+  # Fetched up front so a failure here stops the run. Folded into the group
+  # below it would be swallowed by the trailing `|| true`, and an exclusion set
+  # that is quietly short opens duplicate pull requests -- unattended, nightly,
+  # with nobody watching.
+  # Titles only: every PR this script opens carries its numbers there, in the
+  # trailing "(#N)" of a single backport or the "(#a, #b, #c)" of a batch.
+  open_titles="$(gh pr list --repo "${REPO}" --base "${V1_BRANCH}" --state open \
+    --limit 200 --json title --jq '.[].title')" ||
+    die "could not list open ${V1_BRANCH} pull requests; refusing to guess at what is already backported"
+
   {
     git log --format='%s' "${base}..${remote}/${V1_BRANCH}"
     git log --format='%b' "${base}..${remote}/${V1_BRANCH}" | grep -E "${bullet}" || true
-    # Titles only: every PR this script opens carries its numbers there, in the
-    # trailing "(#N)" of a single backport or the "(#a, #b, #c)" of a batch.
-    gh pr list --repo "${REPO}" --base "${V1_BRANCH}" --state open --limit 200 \
-      --json title --jq '.[].title'
+    printf '%s\n' "${open_titles}"
   } | grep -oE '#[0-9]+' | tr -d '#' || true
 }
 
@@ -345,6 +352,7 @@ clone cannot be used, check out with fetch-depth: 0"
   # Drop anything already on v1. --all filters this way by construction; doing
   # it for explicit numbers too keeps a re-run a no-op rather than an error,
   # which is what lets the workflow retry a PR safely.
+  local pr
   if [[ "${take_all}" != true && "${force}" != true ]]; then
     local done_prs kept=()
     done_prs="$(backported_prs "${remote}" | sort -u)"
@@ -387,7 +395,6 @@ clone cannot be used, check out with fetch-depth: 0"
     mkdir -p "$(dirname "${worktree}")"
     git worktree add --quiet -b "${branch}" "${worktree}" "${remote}/${V1_BRANCH}"
 
-    local pr
     for pr in "${prs[@]}"; do
       apply_pr "${pr}" "${worktree}"
     done
