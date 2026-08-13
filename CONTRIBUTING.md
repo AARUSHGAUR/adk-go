@@ -185,6 +185,11 @@ otherwise read the relevant `SKILL.md` before starting that kind of work.
     `examples/`: directory layout, `main.go` anatomy, the README template with
     its diagram and transcript, and the checks to run before opening the PR.
 
+-   **`adk-v2-migration`** — upgrading a project from ADK Go 1.x to 2.x: the
+    `/v2` module path, the unified `agent.Context`, the `session.NewEvent`
+    signature, the changed `Event` JSON shape for stored sessions, and the
+    changes that compile but behave differently.
+
 `AGENTS.md` carries the rest of the project context an agent needs.
 
 # ADK Web
