@@ -120,7 +120,7 @@ func (c *Client) retrieveConnector(ctx context.Context, req Request) (outcome, e
 	url := fmt.Sprintf("%s/v1alpha/%s/credentials:retrieve", c.connectorURL, req.Resource)
 
 	var op connectorOperation
-	if err := c.doPost(ctx, connectorService, url, retrieveRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}, &op); err != nil {
+	if err := c.doPost(ctx, connectorService, url, newRetrieveRequest(req), &op); err != nil {
 		return nil, err
 	}
 	return op.result(req.Resource)

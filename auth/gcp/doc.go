@@ -19,17 +19,17 @@
 // non-interactive "pending" state and surfacing interactive consent as an
 // [auth.ConsentRequiredError].
 //
-// A retrieved credential can be granted narrower scopes than were asked for, so
-// callers must compare [Result.Scopes] against what they need rather than assume
-// the request was honoured in full.
-//
 // No generated Go client libraries exist for these (preview) services and their
 // surface is a single RPC, so the client is hand-rolled over net/http to keep
 // dependencies light. Calls to the credential services are authenticated with
 // Application Default Credentials (cloud-platform scope) unless a custom
 // *http.Client is supplied.
 //
-// This package holds only the transport-level client. The [auth.CredentialProvider]
-// that resolves the acting user from the invocation context is a separate,
-// higher layer.
+// A retrieved credential can be granted narrower scopes than were asked for, so
+// callers must compare [Result.Scopes] against what they need rather than assume
+// the request was honoured in full.
+//
+// This package holds only the transport-level client. An
+// [auth.CredentialProvider] that resolves the acting user from the invocation
+// context would sit above it, in a separate layer.
 package gcp

@@ -63,7 +63,7 @@ func (c *Client) retrieveAgentIdentity(ctx context.Context, req Request) (outcom
 	url := fmt.Sprintf("%s/v1/%s/credentials:retrieve", c.agentIdentityURL, req.Resource)
 
 	var out agentIdentityResponse
-	if err := c.doPost(ctx, agentIdentityService, url, retrieveRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}, &out); err != nil {
+	if err := c.doPost(ctx, agentIdentityService, url, newRetrieveRequest(req), &out); err != nil {
 		return nil, err
 	}
 	return out.result(req.Resource)
