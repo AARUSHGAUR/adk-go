@@ -188,10 +188,26 @@ type Request struct {
 	ContinueURI string
 }
 
+// Result is a credential retrieved for an end user, together with the metadata
+// the service returned alongside it.
+type Result struct {
+	// Credential applies the retrieved token to an outbound request.
+	Credential auth.Credential
+	// Scopes are the scopes actually granted, which can be narrower than those
+	// requested: an end user may refuse some, and an authorization server may
+	// return a different set. Callers must check that everything they need is
+	// present. Empty if the service did not say.
+	Scopes []string
+	// Expiry is when the token stops working, or the zero time if the service did
+	// not say. It is an upper bound: the token can be revoked earlier, and clock
+	// skew between the service and this process can retire it sooner still.
+	Expiry time.Time
+}
+
 // RetrieveCredential retrieves a credential for req, polling while the service
 // reports a non-interactive pending state (up to the configured poll timeout).
 // If interactive consent is required it returns an [auth.ConsentRequiredError].
-func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Credential, error) {
+func (c *Client) RetrieveCredential(ctx context.Context, req Request) (*Result, error) {
 	if req.Resource == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a Resource")
 	}
@@ -216,7 +232,11 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 		}
 		switch o := res.(type) {
 		case credOutcome:
-			return mapCredential(o.header, o.token)
+			cred, err := mapCredential(o.header, o.token)
+			if err != nil {
+				return nil, err
+			}
+			return &Result{Credential: cred, Scopes: o.scopes, Expiry: o.expiry}, nil
 		case consentOutcome:
 			return nil, &auth.ConsentRequiredError{AuthURI: o.authURI, Nonce: o.nonce}
 		case rejectedOutcome:
@@ -244,8 +264,12 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 type outcome interface{ isOutcome() }
 
 type (
-	// credOutcome carries a successfully retrieved {header, token} credential.
-	credOutcome struct{ header, token string }
+	// credOutcome carries a successfully retrieved credential and its metadata.
+	credOutcome struct {
+		header, token string
+		scopes        []string
+		expiry        time.Time
+	}
 	// pendingOutcome means retrieval is still pending; poll again.
 	pendingOutcome struct{}
 	// consentOutcome means interactive consent is required at authURI.
@@ -262,11 +286,28 @@ func (pendingOutcome) isOutcome()  {}
 func (consentOutcome) isOutcome()  {}
 func (rejectedOutcome) isOutcome() {}
 
-// credentialPayload is the {header, token} success shape shared by both services
-// (under "success" for Agent Identity, "response" for the IAM Connector operation).
+// credentialPayload is the success shape shared by both services (under
+// "success" for Agent Identity, "response" for the IAM Connector operation).
 type credentialPayload struct {
-	Token  string `json:"token"`
-	Header string `json:"header"`
+	Token      string   `json:"token"`
+	Header     string   `json:"header"`
+	Scopes     []string `json:"scopes"`
+	ExpireTime string   `json:"expireTime"`
+}
+
+// outcome converts the payload, reporting an expiry the service sent but this
+// client cannot read rather than quietly returning a credential without one.
+func (p credentialPayload) outcome() (outcome, error) {
+	o := credOutcome{header: p.Header, token: p.Token, scopes: p.Scopes}
+	if p.ExpireTime != "" {
+		t, err := time.Parse(time.RFC3339, p.ExpireTime)
+		if err != nil {
+			return nil, fmt.Errorf("gcp: credentials service returned an unparseable expireTime %q: %w",
+				truncateForError(p.ExpireTime), err)
+		}
+		o.expiry = t
+	}
+	return o, nil
 }
 
 // retrieveRequest is the JSON body for both services' credentials:retrieve RPC

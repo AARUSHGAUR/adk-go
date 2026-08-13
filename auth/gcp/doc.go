@@ -13,10 +13,15 @@
 // limitations under the License.
 
 // Package gcp is a hand-rolled REST client for the Google Cloud Agent Identity
-// and IAM Connector credential services. Given a resource name it retrieves an
-// end-user credential and maps it to an [auth.Credential], polling while the
-// service reports a non-interactive "pending" state and surfacing interactive
-// consent as an [auth.ConsentRequiredError].
+// and IAM Connector credential services. Given a resource name and the acting
+// end user's id it retrieves that user's credential and returns it as a
+// [Result] wrapping an [auth.Credential], polling while the service reports a
+// non-interactive "pending" state and surfacing interactive consent as an
+// [auth.ConsentRequiredError].
+//
+// A retrieved credential can be granted narrower scopes than were asked for, so
+// callers must compare [Result.Scopes] against what they need rather than assume
+// the request was honoured in full.
 //
 // No generated Go client libraries exist for these (preview) services and their
 // surface is a single RPC, so the client is hand-rolled over net/http to keep

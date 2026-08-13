@@ -132,7 +132,7 @@ func TestRetrieveCredential(t *testing.T) {
 			srv, calls := sequenceServer(tc.bodies...)
 			defer srv.Close()
 
-			cred, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+			res, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
 				Request{Resource: tc.resource, UserID: "u"})
 
 			switch {
@@ -140,12 +140,12 @@ func TestRetrieveCredential(t *testing.T) {
 				if err != nil {
 					t.Fatalf("RetrieveCredential() error = %v", err)
 				}
-				wantBearer(t, cred, tc.wantBearer)
+				wantBearer(t, res.Credential, tc.wantBearer)
 			case tc.wantAPIKey[0] != "":
 				if err != nil {
 					t.Fatalf("RetrieveCredential() error = %v", err)
 				}
-				wantAPIKey(t, cred, tc.wantAPIKey[0], tc.wantAPIKey[1])
+				wantAPIKey(t, res.Credential, tc.wantAPIKey[0], tc.wantAPIKey[1])
 			case tc.wantConsent[0] != "":
 				var consent *auth.ConsentRequiredError
 				if !errors.As(err, &consent) {
@@ -484,9 +484,9 @@ func TestNewClientRefusesRedirects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-	cred, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"})
+	res, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"})
 	if err == nil {
-		t.Fatalf("RetrieveCredential() = %#v, nil error; want the 3xx surfaced as an error", cred)
+		t.Fatalf("RetrieveCredential() = %#v, nil error; want the 3xx surfaced as an error", res)
 	}
 	if targetSawAuth != "" {
 		t.Errorf("redirect target received Authorization %q; the token must not leave the configured host", targetSawAuth)
@@ -509,11 +509,11 @@ func TestNewClientOutlivesConstructionCtx(t *testing.T) {
 	}
 	cancel()
 
-	cred, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"})
+	res, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"})
 	if err != nil {
 		t.Fatalf("RetrieveCredential() error = %v", err)
 	}
-	wantBearer(t, cred, "tok")
+	wantBearer(t, res.Credential, "tok")
 }
 
 // fakeADC points Application Default Credentials at a local token server so the
@@ -655,9 +655,9 @@ func TestSuppliedHTTPClientRefusesRedirects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-	cred, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "victim@example.com"})
+	res, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "victim@example.com"})
 	if err == nil {
-		t.Fatalf("RetrieveCredential() = %#v, nil error; want the 3xx surfaced as an error", cred)
+		t.Fatalf("RetrieveCredential() = %#v, nil error; want the 3xx surfaced as an error", res)
 	}
 	if targetSawAuth != "" {
 		t.Errorf("redirect target received Authorization %q; the caller's token must not leave the configured host", targetSawAuth)
@@ -665,8 +665,8 @@ func TestSuppliedHTTPClientRefusesRedirects(t *testing.T) {
 	if targetSawBody != "" {
 		t.Errorf("redirect target received the request body %q; the acting user id must not leak", targetSawBody)
 	}
-	if cred != nil {
-		t.Errorf("RetrieveCredential() = %#v; the redirect target must not dictate the credential", cred)
+	if res != nil {
+		t.Errorf("RetrieveCredential() = %#v; the redirect target must not dictate the credential", res)
 	}
 }
 
@@ -700,5 +700,41 @@ func TestRetrieveRedirectIsAnAPIError(t *testing.T) {
 				t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, status)
 			}
 		})
+	}
+}
+
+// The service returns the granted scopes and the token's expiry; both must
+// reach the caller. A grant narrower than the request is the only signal that
+// an end user refused part of it, and the expiry is the only bound on the
+// token's life.
+func TestRetrieveCredentialCarriesScopesAndExpiry(t *testing.T) {
+	srv, _ := sequenceServer(`{"success":{"token":"tok","header":"Authorization: Bearer","scopes":["read"],"expireTime":"2031-04-05T06:07:08Z"}}`)
+	defer srv.Close()
+
+	res, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+		Request{Resource: authProviderResource, UserID: "u", Scopes: []string{"read", "write"}})
+	if err != nil {
+		t.Fatalf("RetrieveCredential() error = %v", err)
+	}
+	wantBearer(t, res.Credential, "tok")
+	if !slices.Equal(res.Scopes, []string{"read"}) {
+		t.Errorf("Scopes = %q, want [read] (the grant was narrower than the request)", res.Scopes)
+	}
+	want := time.Date(2031, 4, 5, 6, 7, 8, 0, time.UTC)
+	if !res.Expiry.Equal(want) {
+		t.Errorf("Expiry = %v, want %v", res.Expiry, want)
+	}
+}
+
+// An expiry this client cannot read is reported, not silently dropped: a
+// credential with a wrongly-zero Expiry reads as "never expires".
+func TestRetrieveCredentialRejectsUnparseableExpiry(t *testing.T) {
+	srv, _ := sequenceServer(`{"success":{"token":"tok","header":"Authorization: Bearer","expireTime":"soon"}}`)
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+		Request{Resource: authProviderResource, UserID: "u"})
+	if err == nil || !strings.Contains(err.Error(), "unparseable expireTime") {
+		t.Fatalf("error = %v, want it to name the unparseable expireTime", err)
 	}
 }

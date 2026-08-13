@@ -38,7 +38,7 @@ type consentDetail struct {
 func (r agentIdentityResponse) result(resource string) (outcome, error) {
 	switch {
 	case r.Success != nil:
-		return credOutcome{header: r.Success.Header, token: r.Success.Token}, nil
+		return r.Success.outcome()
 	case r.URIConsentRequired != nil:
 		return consentOutcome{authURI: r.URIConsentRequired.AuthorizationURI, nonce: r.URIConsentRequired.ConsentNonce}, nil
 	case r.ConsentRejected != nil:
