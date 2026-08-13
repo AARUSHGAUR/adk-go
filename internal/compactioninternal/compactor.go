@@ -17,7 +17,6 @@ package compactioninternal
 import (
 	"context"
 	"fmt"
-	"maps"
 	"reflect"
 	"slices"
 
@@ -244,10 +243,23 @@ func collect(sess session.Session) []*session.Event {
 // to dictate the range, and clearing Branch to escape an isolation scope were
 // all reachable, and so was planting a compaction record on a live event.
 //
-// Content is copied too, not just the event struct. Everything the record is
-// derived from is a scalar and a struct copy would cover it, but the events are
-// the conversation, and handing out a writable pointer to stored history is the
-// larger half of the problem.
+// The snapshot is built field by field from what a summarizer is for, rather
+// than by copying the event and severing the pointers afterwards. Copying and
+// severing was the first approach and it does not hold: session.Event and
+// genai.Part between them reach sixteen pointers, maps and slices, a struct
+// copy shares every one, and each field added upstream is silently shared until
+// somebody notices. Naming the fields inverts that, so a new field is absent
+// from the summarizer's view until it is deliberately added.
+//
+// What a summarizer needs is the conversation: who spoke, when, and what was
+// said, including the name and arguments of a tool call, because a transcript
+// renders those. What it does not need is the framework's own bookkeeping. The
+// compaction record is the sharpest case: it is a live pointer into stored
+// history, it decides what every future prompt drops, and a summarizer writing
+// through it put an unpaired function call into a real model prompt. Only
+// whether an event is a summary, and the range it stood for, survive into the
+// copy, both as scalars. The text of a previous summary is still readable,
+// because the seed carries it as ordinary content.
 func snapshotForSummarizer(events []*session.Event) []*session.Event {
 	out := make([]*session.Event, 0, len(events))
 	for _, ev := range events {
@@ -255,23 +267,85 @@ func snapshotForSummarizer(events []*session.Event) []*session.Event {
 			out = append(out, nil)
 			continue
 		}
-		clone := *ev
-		if c := ev.LLMResponse.Content; c != nil {
-			content := *c
-			content.Parts = slices.Clone(c.Parts)
-			for i, p := range content.Parts {
-				if p != nil {
-					part := *p
-					content.Parts[i] = &part
-				}
-			}
-			clone.LLMResponse.Content = &content
+		clone := &session.Event{
+			ID:             ev.ID,
+			Timestamp:      ev.Timestamp,
+			InvocationID:   ev.InvocationID,
+			Branch:         ev.Branch,
+			IsolationScope: ev.IsolationScope,
+			Author:         ev.Author,
 		}
-		clone.Actions.StateDelta = maps.Clone(ev.Actions.StateDelta)
-		clone.Actions.ArtifactDelta = maps.Clone(ev.Actions.ArtifactDelta)
-		out = append(out, &clone)
+		if c := ev.LLMResponse.Content; c != nil {
+			clone.LLMResponse.Content = copyContent(c)
+		}
+		if rng := ev.Actions.Compaction; rng != nil {
+			// Scalars only. Enough to tell a summary apart from a turn and to
+			// see what it spanned, carrying no pointer back into the store.
+			clone.Actions.Compaction = &session.EventCompaction{
+				StartTimestamp: rng.StartTimestamp,
+				EndTimestamp:   rng.EndTimestamp,
+			}
+		}
+		out = append(out, clone)
 	}
 	return out
+}
+
+// copyContent deep-copies the parts of a content, including the members a
+// transcript reads through: a tool call's name and arguments, a tool response's
+// payload, and inline data. Copying the Part struct alone leaves all three
+// shared with the store.
+func copyContent(c *genai.Content) *genai.Content {
+	content := *c
+	content.Parts = slices.Clone(c.Parts)
+	for i, p := range content.Parts {
+		if p == nil {
+			continue
+		}
+		part := *p
+		if fc := p.FunctionCall; fc != nil {
+			call := *fc
+			call.Args = copyAny(fc.Args).(map[string]any)
+			part.FunctionCall = &call
+		}
+		if fr := p.FunctionResponse; fr != nil {
+			resp := *fr
+			resp.Response = copyAny(fr.Response).(map[string]any)
+			part.FunctionResponse = &resp
+		}
+		if b := p.InlineData; b != nil {
+			blob := *b
+			blob.Data = slices.Clone(b.Data)
+			part.InlineData = &blob
+		}
+		content.Parts[i] = &part
+	}
+	return &content
+}
+
+// copyAny deep-copies the decoded-JSON shapes a tool payload is made of. A
+// shallow map clone protects the top level and leaves a nested map shared,
+// which is the same hole one level down.
+func copyAny(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		if t == nil {
+			return map[string]any(nil)
+		}
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[k] = copyAny(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, val := range t {
+			out[i] = copyAny(val)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // summarizerTypeName is the bare type name of a Summarizer, without package
