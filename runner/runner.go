@@ -326,6 +326,15 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 			return fmt.Errorf("%w: plugin rejected the summary event: %w", compaction.ErrCompaction, err)
 		}
 		if modified != nil {
+			// Re-checked, because a replacement did not go through the builder
+			// that filters a summarizer's output. A plugin is trusted to see
+			// and rewrite a summary, not to put a function call into the next
+			// prompt.
+			if !compactioninternal.SanitizeSummary(modified) {
+				finish(nil, "a plugin left the summary with nothing usable in it")
+				log.Printf("adk: discarding a context compaction summary because a plugin left no usable content in it")
+				return nil
+			}
 			summary = modified
 		}
 	}

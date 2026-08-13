@@ -17,7 +17,9 @@ package compactioninternal
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 
 	"go.opentelemetry.io/otel/codes"
 
@@ -159,7 +161,7 @@ func summarizeTraced(ctx context.Context, cfg *compaction.Config, sess session.S
 		}
 	}()
 
-	content, usage, err := cfg.Summarizer.SummarizeEvents(ctx, window)
+	content, usage, err := cfg.Summarizer.SummarizeEvents(ctx, snapshotForSummarizer(window))
 
 	// The framework builds the event, so a summarizer contributes the summary
 	// and nothing else. Everything that decides what happens to history -- the
@@ -228,6 +230,48 @@ func collect(sess session.Session) []*session.Event {
 		events = append(events, ev)
 	}
 	return events
+}
+
+// snapshotForSummarizer returns copies of the events to hand to third-party
+// code.
+//
+// The interface says the events passed in are never modified, and nothing
+// enforced it: the slice was copied but the events were not, so a Summarizer
+// received the session's live pointers. Narrowing the return type stopped it
+// declaring an authorship or a covered range, and left it able to impose both
+// by writing to its input, because the record is derived from those same
+// objects after the call. Rewriting the stored conversation, moving timestamps
+// to dictate the range, and clearing Branch to escape an isolation scope were
+// all reachable, and so was planting a compaction record on a live event.
+//
+// Content is copied too, not just the event struct. Everything the record is
+// derived from is a scalar and a struct copy would cover it, but the events are
+// the conversation, and handing out a writable pointer to stored history is the
+// larger half of the problem.
+func snapshotForSummarizer(events []*session.Event) []*session.Event {
+	out := make([]*session.Event, 0, len(events))
+	for _, ev := range events {
+		if ev == nil {
+			out = append(out, nil)
+			continue
+		}
+		clone := *ev
+		if c := ev.LLMResponse.Content; c != nil {
+			content := *c
+			content.Parts = slices.Clone(c.Parts)
+			for i, p := range content.Parts {
+				if p != nil {
+					part := *p
+					content.Parts[i] = &part
+				}
+			}
+			clone.LLMResponse.Content = &content
+		}
+		clone.Actions.StateDelta = maps.Clone(ev.Actions.StateDelta)
+		clone.Actions.ArtifactDelta = maps.Clone(ev.Actions.ArtifactDelta)
+		out = append(out, &clone)
+	}
+	return out
 }
 
 // summarizerTypeName is the bare type name of a Summarizer, without package

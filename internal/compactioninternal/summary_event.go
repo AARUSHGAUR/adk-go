@@ -179,3 +179,39 @@ func hasProse(c *genai.Content) bool {
 	}
 	return false
 }
+
+// SanitizeSummary strips anything from a compaction record that must not reach
+// a prompt, and reports whether the record is still usable.
+//
+// The framework builds a summary event and filters its content, but a plugin
+// can replace that event wholesale on its way to the session, and the
+// replacement went to storage unexamined. A plugin returning content with a
+// text part and a FunctionCall got that unpaired call into a real model prompt,
+// which is the exact thing the filter on the summarizer path exists to stop.
+//
+// Reports false when nothing usable survives, which the caller treats as a
+// summary not worth storing rather than as an error: the plugin was within its
+// rights to redact everything.
+func SanitizeSummary(ev *session.Event) bool {
+	if ev == nil || ev.Actions.Compaction == nil {
+		return false
+	}
+	c := ev.Actions.Compaction.CompactedContent
+	if c == nil {
+		return false
+	}
+	kept := make([]*genai.Part, 0, len(c.Parts))
+	for _, p := range c.Parts {
+		if utils.IsProsePart(p) {
+			part := *p
+			kept = append(kept, &part)
+		}
+	}
+	if len(kept) == 0 {
+		return false
+	}
+	content := *c
+	content.Parts = kept
+	ev.Actions.Compaction.CompactedContent = &content
+	return true
+}

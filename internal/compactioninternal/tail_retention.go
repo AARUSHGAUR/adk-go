@@ -132,13 +132,23 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 	if err != nil {
 		return nil, noop, fmt.Errorf("tail-retention summarization failed: %w", err)
 	}
-	// Recorded only now. A failed attempt must leave the gate as it found it,
-	// or one transient summarizer error disarms compaction for the rest of the
-	// invocation and the prompt grows unchecked behind it.
-	if progress != nil && summary != nil {
-		progress.RecordAt(tokens)
+	// Recorded when the summary is actually stored, which only the caller
+	// knows, so it rides on the same callback that closes the span.
+	//
+	// Recording the attempt disarmed compaction for the rest of the invocation
+	// with nothing stored in exchange. Moving it past the summarizer fixed the
+	// transient-error case and left four others: the caller can still discard
+	// the result because the turn was cancelled, a re-read failed, a competing
+	// compaction landed, or the append failed. Each left the gate closed on a
+	// summary that never existed, and Recovered cannot reopen it because the
+	// prompt never drops.
+	recordOnSuccess := func(err error, discardReason string) {
+		if progress != nil && err == nil && discardReason == "" {
+			progress.RecordAt(tokens)
+		}
+		finish(err, discardReason)
 	}
-	return summary, finish, nil
+	return summary, recordOnSuccess, nil
 }
 
 // charsPerToken is the crude characters-to-tokens ratio used when no model has

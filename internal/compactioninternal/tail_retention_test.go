@@ -845,3 +845,54 @@ func TestPromptTokenCountIgnoresOtherIsolationScopes(t *testing.T) {
 		t.Errorf("promptTokenCount() = %d, want 40: the reading came from another isolation scope", got)
 	}
 }
+
+// TestTailRetentionDoesNotRecordADiscardedSummary pins that a summary the
+// caller throws away leaves the progress gate as it found it.
+//
+// Recording the attempt rather than the result disarmed compaction for the rest
+// of an invocation with nothing stored. Moving the call past the summarizer
+// fixed the transient-error case and left four others, because the caller can
+// still discard a perfectly good summary: a cancelled turn, a failed re-read, a
+// competing compaction, a failed append. Each closed the gate on a summary that
+// never existed, and Recovered cannot reopen it because the prompt never drops.
+func TestTailRetentionDoesNotRecordADiscardedSummary(t *testing.T) {
+	t.Parallel()
+
+	events := []*session.Event{
+		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
+		textEvent("c", "inv2", 3, "q2"), withUsage(modelTextEvent("d", "inv2", 4, "a2"), 900),
+	}
+	tests := []struct {
+		name          string
+		finishErr     error
+		discardReason string
+		wantRecorded  bool
+	}{
+		{name: "stored", wantRecorded: true},
+		{name: "discarded by the caller", discardReason: "a competing compaction landed"},
+		{name: "failed on the way to the session", finishErr: errors.New("append failed")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// Per subtest: the summarizer counts its calls, so sharing one
+			// across parallel subtests races.
+			cfg := &compaction.Config{
+				TokenThreshold: 100, EventRetentionSize: 2,
+				Summarizer: &fakeSummarizer{summary: "sum"},
+			}
+			gate := &recordingGate{allow: true}
+			summary, finish, err := TailRetention(context.Background(), cfg,
+				&staticSession{events: events}, TurnScope{}, nil, gate)
+			if err != nil || summary == nil {
+				t.Fatalf("TailRetention() = %v, %v, want a summary", summary, err)
+			}
+			finish(tt.finishErr, tt.discardReason)
+
+			if gotRecorded := len(gate.recorded) > 0; gotRecorded != tt.wantRecorded {
+				t.Errorf("gate recorded = %t, want %t: %v", gotRecorded, tt.wantRecorded, gate.recorded)
+			}
+		})
+	}
+}
