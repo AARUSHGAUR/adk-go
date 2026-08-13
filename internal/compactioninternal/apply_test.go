@@ -568,3 +568,53 @@ func TestUnwrapSessionStopsOnACycle(t *testing.T) {
 		t.Fatal("UnwrapSession did not return: the unwrap loop has no cycle guard")
 	}
 }
+
+// TestExcludesSurvivesABackendThatDropsPrecision pins that a hole still matches
+// after a round trip through a store that keeps fewer digits than the clock.
+//
+// A reference is written from an event held in memory and compared against the
+// same event read back. The SQL backend truncates event timestamps to
+// microseconds while the compaction record travels beside them as JSON at full
+// nanosecond precision, and the Vertex AI service takes the event timestamp
+// from the server envelope while the reference comes from the client-written
+// payload. Comparing exactly answered no for an event the reference names, and
+// coverage is the range minus the exclusions, so answering no does not leave
+// the event alone: it hands it to a summary that never saw it.
+//
+// On SQL this is currently masked, and only by accident. AppendEvent truncates
+// the caller's event struct in place, so a reference built later from either
+// copy agrees. That is an undocumented mutation of an argument the caller still
+// owns, and tidying it away would silently start deleting conversation.
+func TestExcludesSurvivesABackendThatDropsPrecision(t *testing.T) {
+	t.Parallel()
+
+	ns := time.Date(2026, 3, 4, 5, 6, 7, 123456789, time.UTC)
+	rng := &session.EventCompaction{
+		StartTimestamp: ns.Add(-time.Hour),
+		EndTimestamp:   ns.Add(time.Hour),
+		// Written at full precision, the way a record reaches storage.
+		ExcludedEvents: []session.EventRef{{InvocationID: "inv1", Timestamp: ns}},
+	}
+	// Read back from a store that keeps microseconds.
+	ev := &session.Event{ID: "a", InvocationID: "inv1", Timestamp: ns.Truncate(time.Microsecond)}
+
+	if ev.Timestamp.Before(rng.StartTimestamp) || ev.Timestamp.After(rng.EndTimestamp) {
+		t.Fatal("the event is outside the interval, so this test proves nothing")
+	}
+	if !excludes(rng, ev) {
+		t.Error("the hole stopped matching after a round trip, so a summary that never saw this event now covers it")
+	}
+	// inRange is coverage: inside the interval and not named as a hole. The
+	// hole matching is what keeps this event out of the summary's reach.
+	if inRange(ev, rng) {
+		t.Error("an event the record names as a hole is being treated as covered")
+	}
+
+	// The range test is deliberately not normalised. An event just past the end
+	// was summarized by nothing, and widening the range to reach it is the
+	// deletion this whole mechanism exists to prevent.
+	past := &session.Event{ID: "b", InvocationID: "inv1", Timestamp: rng.EndTimestamp.Add(time.Nanosecond)}
+	if inRange(past, rng) {
+		t.Error("an event after the range end is being treated as covered")
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"time"
 
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
@@ -342,10 +343,32 @@ func RangeRaced(latest, selectedFrom session.Session, summary *session.Event) bo
 	return false
 }
 
+// refResolution is the granularity a hole reference is compared at.
+//
+// A reference is written from an event held in memory, at whatever precision
+// the clock gave, and compared against the same event read back from a store
+// that may keep fewer digits. The SQL backend truncates event timestamps to
+// microseconds while the record travels beside them as JSON at full nanosecond
+// precision, and the Vertex AI service takes the event timestamp from the
+// server envelope while the reference comes from the client-written payload.
+// Comparing exactly then answers no for an event the reference names, and
+// because coverage is the range minus the exclusions, answering no deletes the
+// event rather than leaving it alone.
+//
+// Microsecond is the coarsest precision any backend here keeps, so truncating
+// both sides to it makes the comparison independent of who stored what.
+const refResolution = time.Microsecond
+
 // excludes reports whether rng names ev as a hole.
+//
+// Only the exclusion test is normalised, never inRange. Widening a hole leaves
+// an extra event raw beside a summary of it, which is recoverable. Widening the
+// range would pull in an event that sits just outside it and was summarized by
+// nothing, which is the deletion this is here to prevent.
 func excludes(rng *session.EventCompaction, ev *session.Event) bool {
+	evAt := ev.Timestamp.Truncate(refResolution)
 	for _, ref := range rng.ExcludedEvents {
-		if ref.InvocationID == ev.InvocationID && ref.Timestamp.Equal(ev.Timestamp) {
+		if ref.InvocationID == ev.InvocationID && ref.Timestamp.Truncate(refResolution).Equal(evAt) {
 			return true
 		}
 	}
