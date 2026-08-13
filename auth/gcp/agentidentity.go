@@ -20,6 +20,8 @@ import (
 )
 
 // agentIdentityResponse mirrors the RetrieveCredentialsResponse "result" oneof.
+// JSON cannot enforce the oneof, so result counts the arms rather than trusting
+// declaration order.
 type agentIdentityResponse struct {
 	Success            *credentialPayload `json:"success"`
 	Pending            *struct{}          `json:"pending"`
@@ -27,15 +29,19 @@ type agentIdentityResponse struct {
 	ConsentRejected    *struct{}          `json:"consentRejected"`
 }
 
-// consentDetail is the shared uri-consent payload across both services.
-type consentDetail struct {
-	AuthorizationURI string `json:"authorizationUri"`
-	ConsentNonce     string `json:"consentNonce"`
-}
-
 // result collapses the response's "result" oneof into an outcome, erroring if
-// the service returned no recognized arm.
+// the service returned no recognized arm, or more than one.
 func (r agentIdentityResponse) result(resource string) (outcome, error) {
+	set := 0
+	for _, ok := range []bool{r.Success != nil, r.Pending != nil, r.URIConsentRequired != nil, r.ConsentRejected != nil} {
+		if ok {
+			set++
+		}
+	}
+	if set > 1 {
+		return nil, fmt.Errorf("%w: %s set %d result arms at once for %q",
+			ErrUnexpectedState, agentIdentityService, set, resource)
+	}
 	switch {
 	case r.Success != nil:
 		return r.Success.outcome()
@@ -46,7 +52,8 @@ func (r agentIdentityResponse) result(resource string) (outcome, error) {
 	case r.Pending != nil:
 		return pendingOutcome{}, nil
 	default:
-		return nil, fmt.Errorf("gcp: agent identity returned an empty result for %q", resource)
+		return nil, fmt.Errorf("%w: %s returned an empty result for %q",
+			ErrUnexpectedState, agentIdentityService, resource)
 	}
 }
 
@@ -54,10 +61,9 @@ func (r agentIdentityResponse) result(resource string) (outcome, error) {
 // returned synchronously (no long-running-operation wrapper).
 func (c *Client) retrieveAgentIdentity(ctx context.Context, req Request) (outcome, error) {
 	url := fmt.Sprintf("%s/v1/%s/credentials:retrieve", c.agentIdentityURL, req.Resource)
-	body := retrieveRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}
 
 	var out agentIdentityResponse
-	if err := c.doPost(ctx, url, body, &out); err != nil {
+	if err := c.doPost(ctx, agentIdentityService, url, retrieveRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}, &out); err != nil {
 		return nil, err
 	}
 	return out.result(req.Resource)

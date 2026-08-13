@@ -38,6 +38,9 @@ const (
 	defaultAgentIdentityURL = "https://agentidentitycredentials.googleapis.com"
 	defaultConnectorURL     = "https://iamconnectorcredentials.googleapis.com"
 
+	agentIdentityService = "agent identity credentials service"
+	connectorService     = "IAM connector credentials service"
+
 	defaultPollTimeout = 10 * time.Second
 	// The credentials service documents an exponential polling backoff
 	// (0.5, 1, 2, 4, 8s); these constants track it.
@@ -62,12 +65,18 @@ var (
 	// ErrPollTimeout means polling exceeded the poll timeout while the credential
 	// was still pending.
 	ErrPollTimeout = errors.New("gcp: timed out waiting for credentials")
+	// ErrUnexpectedState means a service reported a state this client does not
+	// recognize. It is returned rather than polling on, so wire drift surfaces as
+	// itself instead of as a timeout.
+	ErrUnexpectedState = errors.New("gcp: credentials service returned an unrecognized state")
 )
 
 // APIError is returned when a credential service responds with a non-2xx
 // status. Callers match it with errors.As to tell a fatal status (say 403) from
 // a transient one (503) without matching on the message.
 type APIError struct {
+	// Service names which of the two credential services answered.
+	Service string
 	// StatusCode is the HTTP status code of the response.
 	StatusCode int
 	// Body is the response body, truncated, useful for diagnosing the failure.
@@ -77,7 +86,30 @@ type APIError struct {
 func (e *APIError) Error() string {
 	// %q, not %s: the body is service-controlled and can carry control bytes
 	// that would otherwise forge lines in an operator's log.
-	return fmt.Sprintf("gcp: credentials service returned status %d: %q", e.StatusCode, e.Body)
+	return fmt.Sprintf("gcp: %s returned status %d: %q", e.Service, e.StatusCode, e.Body)
+}
+
+// OperationError is returned when the IAM Connector reports a failed operation.
+// That failure arrives inside an HTTP 200, so it never becomes an [APIError];
+// callers reach the canonical google.rpc code with errors.As.
+type OperationError struct {
+	// Service names which of the two credential services answered.
+	Service string
+	// Resource is the resource the credential was requested for.
+	Resource string
+	// Code is the canonical google.rpc.Code. Zero means the service reported no
+	// code, not success.
+	Code int
+	// Message is the service's message, truncated to 1 KiB. Service-controlled;
+	// treat it like [APIError.Body].
+	Message string
+}
+
+func (e *OperationError) Error() string {
+	if e.Message == "" {
+		return fmt.Sprintf("gcp: %s reported a failed operation for %q (code %d)", e.Service, e.Resource, e.Code)
+	}
+	return fmt.Sprintf("gcp: %s reported a failed operation for %q (code %d): %q", e.Service, e.Resource, e.Code, e.Message)
 }
 
 // Client retrieves end-user credentials from the Agent Identity / IAM Connector
@@ -310,6 +342,12 @@ func (p credentialPayload) outcome() (outcome, error) {
 	return o, nil
 }
 
+// consentDetail is the shared uri-consent payload across both services.
+type consentDetail struct {
+	AuthorizationURI string `json:"authorizationUri"`
+	ConsentNonce     string `json:"consentNonce"`
+}
+
 // retrieveRequest is the JSON body for both services' credentials:retrieve RPC
 // (the auth provider / connector is bound to the URL path, not the body).
 type retrieveRequest struct {
@@ -342,7 +380,7 @@ func mapCredential(header, token string) (auth.Credential, error) {
 }
 
 // doPost sends body as JSON to url and decodes a JSON response into out.
-func (c *Client) doPost(ctx context.Context, url string, body, out any) error {
+func (c *Client) doPost(ctx context.Context, service, url string, body, out any) error {
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("gcp: marshal request: %w", err)
@@ -356,7 +394,7 @@ func (c *Client) doPost(ctx context.Context, url string, body, out any) error {
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("gcp: call credentials service: %w", err)
+		return fmt.Errorf("gcp: call %s: %w", service, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -365,18 +403,18 @@ func (c *Client) doPost(ctx context.Context, url string, body, out any) error {
 	const maxBody = 1 << 20
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
-		return fmt.Errorf("gcp: read response: %w", err)
+		return fmt.Errorf("gcp: read response from %s: %w", service, err)
 	}
 	// Classify the status before the size check, so an oversized error page still
 	// reports the status — the most actionable field — instead of only its size.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &APIError{StatusCode: resp.StatusCode, Body: truncateForError(strings.TrimSpace(string(data)))}
+		return &APIError{Service: service, StatusCode: resp.StatusCode, Body: truncateForError(strings.TrimSpace(string(data)))}
 	}
 	if len(data) > maxBody {
-		return fmt.Errorf("gcp: credentials service response exceeded %d bytes", maxBody)
+		return fmt.Errorf("gcp: response from %s exceeded %d bytes", service, maxBody)
 	}
 	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("gcp: decode response: %w", err)
+		return fmt.Errorf("gcp: decode %d-byte response from %s: %w", len(data), service, err)
 	}
 	return nil
 }

@@ -124,7 +124,7 @@ func TestRetrieveCredential(t *testing.T) {
 			name:        "connector done without credential",
 			resource:    connectorResource,
 			bodies:      []string{`{"done":true}`},
-			wantErrText: "no credential",
+			wantErrText: "without a credential",
 		},
 	}
 	for _, tc := range tests {
@@ -736,5 +736,138 @@ func TestRetrieveCredentialRejectsUnparseableExpiry(t *testing.T) {
 		Request{Resource: authProviderResource, UserID: "u"})
 	if err == nil || !strings.Contains(err.Error(), "unparseable expireTime") {
 		t.Fatalf("error = %v, want it to name the unparseable expireTime", err)
+	}
+}
+
+// Every reply shape the services do not document maps to an error rather than
+// to "pending". Treating an unrecognized reply as pending turns a terminal
+// state the client failed to parse into a silent poll to the timeout, reported
+// as the wrong cause.
+func TestConnectorFailsClosedOnUnrecognizedState(t *testing.T) {
+	tests := []struct {
+		name, body, wantSub string
+	}{
+		// The proto's original snake_case spelling: a real rejection the client
+		// cannot parse must not read as "keep polling".
+		{"unparsed metadata", `{"metadata":{"consent_rejected":{}}}`, "no status"},
+		{"no metadata", `{"done":false}`, "no status"},
+		{"two status arms", `{"metadata":{"consentPending":{},"consentRejected":{}}}`, "status arms"},
+		{"credential without done", `{"response":{"token":"t","header":"Authorization: Bearer"}}`, "did not mark done"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, calls := sequenceServer(tc.body)
+			defer srv.Close()
+			_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+				Request{Resource: connectorResource, UserID: "u"})
+			if !errors.Is(err, ErrUnexpectedState) {
+				t.Fatalf("error = %v, want errors.Is ErrUnexpectedState", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("error = %v, want it to contain %q", err, tc.wantSub)
+			}
+			if got := atomic.LoadInt32(calls); got != 1 {
+				t.Errorf("service calls = %d, want 1; an unrecognized state must not be polled", got)
+			}
+		})
+	}
+}
+
+func TestAgentIdentityFailsClosedOnUnrecognizedState(t *testing.T) {
+	tests := []struct {
+		name, body, wantSub string
+	}{
+		{"empty result", `{}`, "empty result"},
+		{"two result arms", `{"pending":{},"consentRejected":{}}`, "result arms"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, calls := sequenceServer(tc.body)
+			defer srv.Close()
+			_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+				Request{Resource: authProviderResource, UserID: "u"})
+			if !errors.Is(err, ErrUnexpectedState) {
+				t.Fatalf("error = %v, want errors.Is ErrUnexpectedState", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("error = %v, want it to contain %q", err, tc.wantSub)
+			}
+			if got := atomic.LoadInt32(calls); got != 1 {
+				t.Errorf("service calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// A done operation with no credential is still explained by a terminal status.
+func TestConnectorDoneWithRejection(t *testing.T) {
+	srv, _ := sequenceServer(`{"done":true,"metadata":{"consentRejected":{}}}`)
+	defer srv.Close()
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+		Request{Resource: connectorResource, UserID: "u"})
+	if !errors.Is(err, ErrConsentRejected) {
+		t.Fatalf("error = %v, want ErrConsentRejected", err)
+	}
+}
+
+// An operation failure arrives inside an HTTP 200, so it is never an *APIError.
+// Callers still need the canonical code without matching on the message.
+func TestConnectorOperationErrorIsTyped(t *testing.T) {
+	srv, _ := sequenceServer(`{"error":{"code":7,"message":"boom"}}`)
+	defer srv.Close()
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+		Request{Resource: connectorResource, UserID: "u"})
+
+	var opErr *OperationError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("error = %v, want *OperationError", err)
+	}
+	if opErr.Code != 7 {
+		t.Errorf("Code = %d, want 7", opErr.Code)
+	}
+	if opErr.Message != "boom" {
+		t.Errorf("Message = %q, want %q", opErr.Message, "boom")
+	}
+	if opErr.Resource != connectorResource {
+		t.Errorf("Resource = %q, want %q", opErr.Resource, connectorResource)
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		t.Error("an operation failure must not masquerade as an *APIError")
+	}
+}
+
+// The operation message is service-controlled: cap and escape it like a body.
+func TestConnectorOperationErrorMessageIsEscapedAndCapped(t *testing.T) {
+	srv, _ := sequenceServer(`{"error":{"code":2,"message":"boom\r\nINFO forged` + strings.Repeat("x", 2000) + `"}}`)
+	defer srv.Close()
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+		Request{Resource: connectorResource, UserID: "u"})
+	var opErr *OperationError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("error = %v, want *OperationError", err)
+	}
+	if len(opErr.Message) > 1024+3 {
+		t.Errorf("Message is %d bytes, want it truncated", len(opErr.Message))
+	}
+	if strings.Contains(err.Error(), "\r\n") {
+		t.Errorf("error carries raw control bytes: %q", err.Error())
+	}
+}
+
+// An HTTP failure must say which of the two services answered.
+func TestAPIErrorNamesTheService(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	_, err := newTestClient(t, srv).RetrieveCredential(t.Context(),
+		Request{Resource: authProviderResource, UserID: "u"})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v, want *APIError", err)
+	}
+	if !strings.Contains(apiErr.Service, "agent identity") {
+		t.Errorf("Service = %q, want it to name the agent identity service", apiErr.Service)
 	}
 }
