@@ -794,8 +794,12 @@ func TestSummarizerGenConfigCarriesOnlyWhatItMeans(t *testing.T) {
 	t.Parallel()
 
 	temp := float32(0.2)
+	maxOut := int32(64)
 	got := summarizerGenConfig(&genai.GenerateContentConfig{
 		Temperature:        &temp,
+		MaxOutputTokens:    maxOut,
+		StopSequences:      []string{"\n\n"},
+		CandidateCount:     4,
 		SafetySettings:     []*genai.SafetySetting{{Category: genai.HarmCategoryHateSpeech}},
 		SystemInstruction:  genai.NewContentFromText("you are a pirate", "user"),
 		Tools:              []*genai.Tool{{}},
@@ -813,6 +817,14 @@ func TestSummarizerGenConfigCarriesOnlyWhatItMeans(t *testing.T) {
 		t.Error("SafetySettings did not carry over")
 	}
 	for name, carried := range map[string]bool{
+		// Sized for the agent's own replies, so a summary of a whole window
+		// does not fit and every summarization fails.
+		"MaxOutputTokens": got.MaxOutputTokens != 0,
+		// A hit reports STOP, which reads as finishing, so a summary cut off at
+		// the first occurrence is stored and the covered turns dropped for it.
+		"StopSequences": got.StopSequences != nil,
+		// Billed per candidate, and only the first is ever read.
+		"CandidateCount":     got.CandidateCount != 0,
 		"SystemInstruction":  got.SystemInstruction != nil,
 		"Tools":              got.Tools != nil,
 		"ResponseMIMEType":   got.ResponseMIMEType != "",

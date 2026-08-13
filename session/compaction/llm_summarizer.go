@@ -382,21 +382,30 @@ func escapeLines(text string) string {
 // them to apply to every call the framework makes on its behalf. Temperature
 // and the sampling controls carry over as the closest thing to "how this
 // application likes its model to behave".
+//
+// Three that sound like they should and do not:
+//
+//   - MaxOutputTokens is sized for the agent's own replies. A summary of a
+//     whole window is longer than a reply, so an ordinary app-level cap fails
+//     the summarization outright and compaction never runs.
+//   - StopSequences are chosen for the agent's output format. A hit reports
+//     finish reason STOP, which is indistinguishable from finishing, so a
+//     summary cut off at the first occurrence of the token is stored and the
+//     covered turns are then dropped in favour of it.
+//   - CandidateCount bills one generation per candidate and only the first is
+//     read, so an app asking for four pays four times for one summary.
 func summarizerGenConfig(cfg *genai.GenerateContentConfig) *genai.GenerateContentConfig {
 	if cfg == nil {
 		return nil
 	}
 	return &genai.GenerateContentConfig{
-		SafetySettings:  cfg.SafetySettings,
-		Temperature:     cfg.Temperature,
-		TopP:            cfg.TopP,
-		TopK:            cfg.TopK,
-		StopSequences:   cfg.StopSequences,
-		CandidateCount:  cfg.CandidateCount,
-		Seed:            cfg.Seed,
-		HTTPOptions:     cfg.HTTPOptions,
-		Labels:          cfg.Labels,
-		MaxOutputTokens: cfg.MaxOutputTokens,
+		SafetySettings: cfg.SafetySettings,
+		Temperature:    cfg.Temperature,
+		TopP:           cfg.TopP,
+		TopK:           cfg.TopK,
+		Seed:           cfg.Seed,
+		HTTPOptions:    cfg.HTTPOptions,
+		Labels:         cfg.Labels,
 	}
 }
 
