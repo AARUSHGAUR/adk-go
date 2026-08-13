@@ -200,5 +200,14 @@ type Summarizer interface {
 	//
 	// Usage may be reported alongside a decline, for a summarizer that spent a
 	// model call and got nothing usable back. It is nil when unknown.
+	//
+	// ctx must be honoured. An implementation that ignores it holds the turn
+	// open for as long as it runs, and cancelling the caller's context does not
+	// cut it short, because the run does not return until this call does.
+	// Post-invocation compaction is driven from a deferred call, so this
+	// outlasts even a consumer that has stopped reading events. The framework
+	// bounds the summarizer it installs by default and cannot bound one it is
+	// handed, so an implementation that calls a model should carry its own
+	// deadline.
 	SummarizeEvents(ctx context.Context, events []*session.Event) (*genai.Content, *genai.GenerateContentResponseUsageMetadata, error)
 }
