@@ -29,6 +29,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/oauth2"
+
 	"google.golang.org/adk/v2/auth"
 )
 
@@ -620,5 +622,83 @@ func TestNewClientRejectsNegativePollTimeout(t *testing.T) {
 	if c.pollTimeout != defaultPollTimeout {
 		t.Errorf("pollTimeout = %v, want the default %v (a negative value must not mean 'never retry')",
 			c.pollTimeout, defaultPollTimeout)
+	}
+}
+
+// A caller-supplied client gets the same redirect guard as the ADC-built one.
+// Building one the ordinary way (oauth2.NewClient) leaves net/http's default
+// redirect policy in place, which would otherwise re-sign the request onto the
+// redirect target and let that target dictate the credential this package
+// returns.
+func TestSuppliedHTTPClientRefusesRedirects(t *testing.T) {
+	var targetSawAuth, targetSawBody string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetSawAuth = r.Header.Get("Authorization")
+		b, _ := io.ReadAll(r.Body)
+		targetSawBody = string(b)
+		_, _ = io.WriteString(w, `{"success":{"token":"ATTACKER","header":"Authorization: Bearer"}}`)
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	caller := oauth2.NewClient(t.Context(),
+		oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "VICTIM-TOKEN", TokenType: "Bearer"}))
+
+	c, err := NewClient(t.Context(), &Config{
+		HTTPClient:            caller,
+		AgentIdentityEndpoint: redirector.URL,
+		ConnectorEndpoint:     redirector.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	cred, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "victim@example.com"})
+	if err == nil {
+		t.Fatalf("RetrieveCredential() = %#v, nil error; want the 3xx surfaced as an error", cred)
+	}
+	if targetSawAuth != "" {
+		t.Errorf("redirect target received Authorization %q; the caller's token must not leave the configured host", targetSawAuth)
+	}
+	if targetSawBody != "" {
+		t.Errorf("redirect target received the request body %q; the acting user id must not leak", targetSawBody)
+	}
+	if cred != nil {
+		t.Errorf("RetrieveCredential() = %#v; the redirect target must not dictate the credential", cred)
+	}
+}
+
+// The guard is applied to a copy: the caller's own client keeps its policy.
+func TestSuppliedHTTPClientIsNotMutated(t *testing.T) {
+	caller := &http.Client{}
+	if _, err := NewClient(t.Context(), &Config{HTTPClient: caller}); err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	if caller.CheckRedirect != nil {
+		t.Error("NewClient mutated the caller's http.Client; it must copy instead")
+	}
+}
+
+// A 3xx is not a success. The client refuses to follow it, so the redirect
+// response itself must be classified as an error carrying its status.
+func TestRetrieveRedirectIsAnAPIError(t *testing.T) {
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "https://elsewhere.example/", status)
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv)
+			_, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"})
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("error = %v, want *APIError", err)
+			}
+			if apiErr.StatusCode != status {
+				t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, status)
+			}
+		})
 	}
 }

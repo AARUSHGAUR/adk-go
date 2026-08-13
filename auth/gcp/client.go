@@ -94,7 +94,10 @@ type Client struct {
 // the corresponding default.
 type Config struct {
 	// HTTPClient calls the credential services. If nil, [NewClient] builds one
-	// from Application Default Credentials (cloud-platform scope). If set, it is
+	// from Application Default Credentials (cloud-platform scope). If set, it
+	// must carry its own credentials, and ADC is not applied; NewClient drives a
+	// shallow copy of it that refuses redirects, leaving the caller's own client
+	// untouched. If set, it is
 	// used verbatim and ADC is not applied, so it must carry its own credentials
 	// and should refuse redirects for the reason [NewClient] describes.
 	HTTPClient *http.Client
@@ -116,15 +119,12 @@ type Config struct {
 // client is detached from ctx's cancellation, so a Client built inside a
 // request-scoped context keeps refreshing its token after that request ends.
 //
-// The ADC-backed client refuses redirects. A credentials:retrieve call has no
-// reason to redirect, and following one would re-sign the request and hand the
-// cloud-platform token to the redirect target.
+// Whichever client is used, it refuses redirects; see [refuseRedirect].
 func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 	if cfg == nil {
 		cfg = &Config{}
 	}
 	c := &Client{
-		httpClient:       cfg.HTTPClient,
 		agentIdentityURL: defaultAgentIdentityURL,
 		connectorURL:     defaultConnectorURL,
 		pollTimeout:      defaultPollTimeout,
@@ -139,24 +139,38 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 	if cfg.PollTimeout > 0 {
 		c.pollTimeout = cfg.PollTimeout
 	}
-	if c.httpClient == nil {
-		// The token source captures this context and reuses it for every later
-		// refresh, so it must outlive the call; discovery itself needs no
-		// cancellation (its only network probe bounds itself).
-		creds, err := google.FindDefaultCredentials(context.WithoutCancel(ctx), cloudPlatformScope)
-		if err != nil {
-			return nil, fmt.Errorf("gcp: find default credentials: %w", err)
-		}
-		hc := oauth2.NewClient(ctx, creds.TokenSource)
-		// oauth2.Transport re-signs every hop, below the layer where net/http
-		// strips credentials on a cross-host redirect, so a redirect would leak
-		// the token to whatever host it names.
-		hc.CheckRedirect = func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		}
-		c.httpClient = hc
+	if cfg.HTTPClient != nil {
+		// Copy rather than mutate: the caller's client is commonly shared process
+		// wide, and changing its redirect policy would reach far outside this
+		// package.
+		hc := *cfg.HTTPClient
+		hc.CheckRedirect = refuseRedirect
+		c.httpClient = &hc
+		return c, nil
 	}
+
+	// The token source captures this context and reuses it for every later
+	// refresh, so it must outlive the call; discovery itself needs no
+	// cancellation (its only network probe bounds itself).
+	creds, err := google.FindDefaultCredentials(context.WithoutCancel(ctx), cloudPlatformScope)
+	if err != nil {
+		return nil, fmt.Errorf("gcp: find default credentials: %w", err)
+	}
+	hc := oauth2.NewClient(ctx, creds.TokenSource)
+	hc.CheckRedirect = refuseRedirect
+	c.httpClient = hc
 	return c, nil
+}
+
+// refuseRedirect is the redirect policy for every client this package drives.
+//
+// A credentials:retrieve call has no reason to redirect, and following one leaks
+// credentials in both directions: oauth2.Transport re-signs every hop below the
+// layer where net/http strips credentials on a cross-host redirect, so the
+// caller's access token would reach the redirect target, and that target's reply
+// would become the credential this package hands back.
+func refuseRedirect(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
 }
 
 // Request identifies the resource and acting user for a credential retrieval.
