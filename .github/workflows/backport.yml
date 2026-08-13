@@ -1,0 +1,132 @@
+# Opens the v1 backport PR for merged `main` pull requests labelled `v2`.
+#
+# The three labels on a `main` PR mean: `v2-only` (stays on 2.x), `v2` (needs a
+# 1.x equivalent), `v1` (already targets the maintenance branch). This workflow
+# acts on `v2`, and is the automation around scripts/backport.sh.
+#
+# The script replays each merged PR's squash commit onto `v1`, rewriting the
+# module path (google.golang.org/adk/v2 -> google.golang.org/adk) so the patch
+# matches the 1.x import blocks, and opens the PR. Conflicts are not guessed
+# at: the run fails and comments on the original PR asking for a manual
+# backport.
+#
+# Triggering on push rather than pull_request_target is deliberate. This job
+# holds a token that can push and open pull requests, and pull_request_target
+# grants that to a workflow running in the context of a pull request; push only
+# ever fires for something already merged. The work is driven off the label
+# queue rather than the event payload, so nothing here depends on which event
+# woke it up.
+name: Backport to v1
+
+on:
+  push:
+    branches: [main]
+
+  # Catches a PR labelled after it merged, which no push will follow.
+  schedule:
+    - cron: '0 3 * * *'
+
+  workflow_dispatch:
+    inputs:
+      prs:
+        description: 'PR numbers to backport, space separated, or "all" to drain the queue'
+        required: true
+        default: all
+
+permissions:
+  contents: read
+
+# Serialize: two pushes in quick succession must not race on the same v1 base.
+concurrency:
+  group: backport-v1
+  cancel-in-progress: false
+
+jobs:
+  backport:
+    runs-on: ubuntu-latest
+    steps:
+      # BACKPORT_TOKEN must be a PAT or GitHub App installation token, not the
+      # built-in GITHUB_TOKEN. Pull requests opened with GITHUB_TOKEN do not
+      # trigger workflow runs, so the backport PR would arrive with no CI and
+      # could never satisfy the checks needed to merge it. Failing loudly here
+      # beats producing an unmergeable PR.
+      - name: Require a backport token
+        env:
+          BACKPORT_TOKEN: ${{ secrets.BACKPORT_TOKEN }}
+        run: |
+          if [ -z "${BACKPORT_TOKEN}" ]; then
+            echo "::error::BACKPORT_TOKEN is not configured. The built-in GITHUB_TOKEN" \
+                 "cannot be used: pull requests it opens do not trigger workflow runs," \
+                 "so the backport PR would never get the CI it needs to be merged."
+            exit 1
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # The full history: the replay needs the merge base of main and v1.
+          fetch-depth: 0
+          token: ${{ secrets.BACKPORT_TOKEN }}
+          # Kept, rather than the usual false, because the script pushes the
+          # backport branch. No untrusted code is checked out here.
+          persist-credentials: true
+
+      - name: Configure git identity
+        env:
+          ACTOR_ID: ${{ github.actor_id }}
+        run: |
+          git config user.name "${GITHUB_ACTOR}"
+          git config user.email "${ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
+
+      - name: Backport
+        id: backport
+        env:
+          GH_TOKEN: ${{ secrets.BACKPORT_TOKEN }}
+          # Passed through the environment rather than interpolated into the
+          # script body, so the value stays data instead of becoming shell.
+          EVENT: ${{ github.event_name }}
+          PRS: ${{ inputs.prs }}
+        run: |
+          set -euo pipefail
+          args=(--all)
+          if [ "${EVENT}" = "workflow_dispatch" ] && [ "${PRS}" != "all" ]; then
+            # shellcheck disable=SC2206  # Deliberate split into separate args.
+            args=(${PRS})
+          fi
+          set +e
+          scripts/backport.sh "${args[@]}" --pr 2>&1 | tee /tmp/backport.log
+          status=${PIPESTATUS[0]}
+          set -e
+          exit "${status}"
+
+      - name: Ask for a manual backport when the replay fails
+        if: failure() && steps.backport.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.BACKPORT_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          # The script names the PR it stopped on; without one there is nowhere
+          # meaningful to comment, so leave the failed run to speak for itself.
+          pr="$(grep -oE 'PR #[0-9]+ does not apply cleanly' /tmp/backport.log |
+                grep -oE '[0-9]+' | head -1 || true)"
+          if [ -z "${pr}" ]; then
+            echo "::warning::backport failed before it reached a specific PR; not commenting"
+            exit 0
+          fi
+          {
+            echo "Automatic backport to \`v1\` failed: the change does not replay cleanly,"
+            echo "which usually means 1.x lacks something 2.x already had."
+            echo
+            echo "To finish it by hand:"
+            echo
+            echo '```bash'
+            echo "scripts/backport.sh ${pr}"
+            echo '```'
+            echo
+            echo "That leaves the conflicts in a scratch worktree with \`.rej\` files and"
+            echo "prints the commands to complete the commit. Re-run with \`--pr\` to open"
+            echo "the PR once it builds."
+            echo
+            echo "[Failed run](${RUN_URL})"
+          } > /tmp/backport-comment.md
+          gh pr comment "${pr}" --body-file /tmp/backport-comment.md

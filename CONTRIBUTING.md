@@ -4,6 +4,7 @@ We'd love to accept your patches and contributions to this project.
 
 -   [How to contribute](#how-to-contribute)
 -   [Branches](#branches)
+    -   [Backporting to `v1`](#backporting-to-v1)
 -   [Multi-Module Development](#multi-module-development)
 -   [Before you begin](#before-you-begin)
     -   [Sign our Contributor License Agreement](#sign-our-contributor-license-agreement)
@@ -43,6 +44,77 @@ To work on a 1.x fix, base your branch on `v1`:
 ```bash
 git switch -c my-fix origin/v1
 ```
+
+### Backporting to `v1`
+
+Every PR into `main` carries one of three labels. They tell reviewers at a
+glance which line a change affects, and they drive the backport queue:
+
+| Label     | Meaning                                                      |
+| --------- | ------------------------------------------------------------ |
+| `v2-only` | Targets `main`; does not need to reach 1.x.                  |
+| `v2`      | Targets `main`; needs an equivalent change on `v1`.          |
+| `v1`      | Targets the `v1` branch, including backport PRs themselves.  |
+
+Label the PR while the context is fresh — at review time, not later. The label
+is what drives the automation, so an unlabelled fix is one nobody backports.
+
+Merging a `v2`-labelled PR opens the backport PR by itself: the
+[`Backport to v1`](.github/workflows/backport.yml) workflow replays the squash
+commit onto `v1` and opens the PR against it. It works off the label queue
+rather than the merge event, so a PR labelled *after* it merged is picked up by
+the nightly run, and re-running on one that is already backported is a no-op
+rather than an error.
+
+The workflow runs `scripts/backport.sh`, which is also usable directly — to
+check the queue, to drain a backlog, or to work through a conflict the
+automation could not:
+
+```bash
+scripts/backport.sh --list         # what is pending?
+scripts/backport.sh 1301           # replay one PR onto a local branch
+scripts/backport.sh --all --pr     # drain the queue, push, open the v1 PR
+```
+
+It replays each commit in a scratch worktree, so your current checkout is never
+touched.
+
+The script rewrites the module path (`google.golang.org/adk/v2` →
+`google.golang.org/adk`) in each patch before applying it. That difference is
+otherwise the main source of cherry-pick conflicts, because it puts every Go
+file's import block out of sync between the two branches.
+
+A queued PR drops off the list once its number is referenced by a commit on
+`v1` or by an open PR targeting `v1`, so the queue clears itself and batching
+several fixes into one backport PR stays cheap.
+
+Backport PRs get the usual CI, because the `pull_request` triggers in `go.yml`
+and `apidiff.yml` filter on the base branch and list `v1`. That relies on a
+`BACKPORT_TOKEN` repository secret holding a PAT or GitHub App token: pull
+requests opened with the built-in `GITHUB_TOKEN` do not trigger workflow runs,
+so the backport PR would arrive with no CI and could never be merged. The
+workflow refuses to start without that secret, and the script confirms the runs
+actually registered before it exits.
+
+Authorship works out the same way it does today. Each replayed commit keeps
+its original author locally, but squash-merging the backport PR makes the PR
+owner the author of the commit that lands on `v1` and records the original
+author as a `Co-authored-by:` trailer.
+
+Two things the tooling cannot do for you:
+
+-   **A clean apply is not a correct backport.** `v1` may lack a helper or a
+    refactor that `main` already had, so a patch can apply and still not
+    compile. Run the full build and test suite in the worktree — the script
+    prints the exact commands — before opening the PR.
+-   **Dependency changes need judgement.** The 1.x dependency set differs from
+    main's, so `go.mod` hunks often reject. Re-run with `--skip-gomod` and
+    `go mod tidy` the module instead.
+
+When a patch conflicts, the script applies what it can, leaves `.rej` files
+behind, and prints the commands needed to finish the commit by hand. Reaching
+that point from the workflow does not fail silently: the run comments on the
+original PR asking for a manual backport.
 
 ## Multi-Module Development
 
