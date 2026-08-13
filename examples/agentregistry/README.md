@@ -41,7 +41,7 @@ denied on resource '//agentregistry.googleapis.com/projects/some-other-project/l
 Grant roles/agentregistry.viewer on this project, or point GOOGLE_CLOUD_PROJECT at one where you have it.
 ```
 
-The message names the exact permission and resource; either grant it or set `GOOGLE_CLOUD_PROJECT` for the run. `discover` and `bind` condense the API's error envelope like this by unwrapping `*agentregistry.APIError` — see `explain` in either `main.go`.
+The message names the exact permission and resource; either grant it or set `GOOGLE_CLOUD_PROJECT` for the run. All three samples condense the API's error envelope like this by unwrapping `*agentregistry.APIError` — see `explain` in any `main.go`.
 
 ## Examples
 

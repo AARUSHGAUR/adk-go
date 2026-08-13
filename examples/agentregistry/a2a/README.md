@@ -114,7 +114,10 @@ go run ./examples/agentregistry/a2a/
 
 ## Example session
 
+No model runs here, so with the card from [Setup](#setup) the output is exactly this:
+
 ```text
+$ go run ./examples/agentregistry/a2a/
 Serving an agent over A2A at http://localhost:8765
 Resolved "registry_echo" from the registry; the URL and transport came from its card
 
@@ -123,7 +126,7 @@ Resolved "registry_echo" from the registry; the URL and transport came from its 
 <<< echo: Hello from the registry!
 ```
 
-`registry_echo` is the name the client read from the **card** — though the local `agent.New` uses that name too, so it is the code, not the line, that shows where it came from: the consuming half never names the agent. The reply carries the request text back, so both directions of the exchange are covered.
+`registry_echo` came off the **card**, not out of the consuming code, which never names the agent. The line alone cannot show that, because the local `agent.New` serves under the same name — the code is where it is visible. The reply carries the request text back, so both directions of the exchange are covered.
 
 ## Cleaning up
 
