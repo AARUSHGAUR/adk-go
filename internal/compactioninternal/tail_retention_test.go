@@ -155,7 +155,7 @@ func TestSelectTailRetentionWindowSeedsPreviousSummary(t *testing.T) {
 
 	events := []*session.Event{
 		textEvent("a", "inv1", 1, "q1"), modelTextEvent("b", "inv1", 2, "a1"),
-		compactionEvent("s1", 3, 1, 2, "earlier summary", "a", "b"),
+		compactionEvent("s1", 3, 1, 2, "earlier summary"),
 		textEvent("c", "inv2", 4, "q2"), modelTextEvent("d", "inv2", 5, "a2"),
 		textEvent("e", "inv3", 6, "q3"), modelTextEvent("f", "inv3", 7, "a3"),
 	}
@@ -178,7 +178,7 @@ func TestSelectTailRetentionWindowSeedsPreviousSummary(t *testing.T) {
 
 	// Summarizing this window must produce a range that strictly contains the
 	// old one, so Apply treats the old summary as subsumed.
-	summary, err := newSummaryEvent(window, genai.NewContentFromText("new summary", "model"), nil)
+	summary, err := newSummaryEvent(window, window, genai.NewContentFromText("new summary", "model"), nil)
 	if err != nil {
 		t.Fatalf("newSummaryEvent() error = %v", err)
 	}

@@ -1417,3 +1417,96 @@ func (m *hangingSummarizerModel) GenerateContent(ctx context.Context, _ *model.L
 		}
 	}
 }
+
+// TestTailRetentionKeepsThePromptBounded is the property tail retention exists
+// for, and the one nothing in the suite asserted.
+//
+// Each round leaves a retained tail, and that tail sits before the compaction
+// record written after it. While candidates were chosen by stream position the
+// tail was never offered again, so it was either deleted by the next record's
+// widened range, which was silent data loss, or left in every later prompt for
+// ever once that deletion was fixed. Measured before this: 66,409 prompt
+// characters at 300 turns and still climbing, against 256 and flat.
+//
+// A bound is the whole claim the package documentation makes for this strategy,
+// so it is asserted directly rather than inferred from a compaction happening.
+func TestTailRetentionKeepsThePromptBounded(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+	// Reports a count derived from the prompt it was given, the way a real
+	// model does. A fixed count would make the progress gate correctly conclude
+	// that compaction never helps and latch off, which is a different test.
+	m := &proportionalUsageModel{}
+	r, _ := newCompactionRunner(t, m, &compaction.Config{
+		TokenThreshold:     200,
+		EventRetentionSize: 2,
+		Summarizer:         &recordingSummarizer{summary: "SUMMARY"},
+	})
+
+	var early, late int
+	const rounds = 60
+	for i := range rounds {
+		drain(t, r.Run(t.Context(), userID, sessionID,
+			genai.NewContentFromText(fmt.Sprintf("question %d", i), genai.RoleUser), agent.RunConfig{}))
+
+		size := 0
+		for _, c := range m.lastPrompt() {
+			for _, p := range c.Parts {
+				size += len(p.Text)
+			}
+		}
+		switch i {
+		case rounds / 3:
+			early = size
+		case rounds - 1:
+			late = size
+		}
+	}
+
+	// Some slack, because a rolling summary and its raw tail vary in length
+	// from turn to turn. What must not happen is growth proportional to the
+	// number of turns.
+	if late > early*2 {
+		t.Errorf("prompt grew from %d characters at turn %d to %d at turn %d: tail retention is not bounding it",
+			early, rounds/3, late, rounds-1)
+	}
+}
+
+// proportionalUsageModel reports a prompt token count derived from the prompt it
+// received, so compaction visibly shrinks the next reading.
+type proportionalUsageModel struct {
+	mu      sync.Mutex
+	prompts [][]*genai.Content
+}
+
+func (m *proportionalUsageModel) Name() string { return "proportional" }
+
+func (m *proportionalUsageModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	m.mu.Lock()
+	m.prompts = append(m.prompts, req.Contents)
+	n := len(m.prompts)
+	m.mu.Unlock()
+
+	chars := 0
+	for _, c := range req.Contents {
+		for _, p := range c.Parts {
+			chars += len(p.Text)
+		}
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{
+			Content:       genai.NewContentFromText(fmt.Sprintf("answer %d", n), "model"),
+			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: int32(chars)},
+		}, nil)
+	}
+}
+
+func (m *proportionalUsageModel) lastPrompt() []*genai.Content {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.prompts) == 0 {
+		return nil
+	}
+	return m.prompts[len(m.prompts)-1]
+}

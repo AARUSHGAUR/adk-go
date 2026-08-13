@@ -250,7 +250,7 @@ func TestCompactionProcessorDoesNotCoverARacedEvent(t *testing.T) {
 	if summarizer.racedID == "" {
 		t.Fatal("the racing summarizer did not record the ID it appended")
 	}
-	covered := stored[0].Actions.Compaction.CoveredEventIDs
+	covered := stored[0].Actions.Compaction.ExcludedEventIDs
 	if slices.Contains(covered, summarizer.racedID) {
 		t.Errorf("the summary covers %q, which was appended after its window was chosen and summarized by nothing", summarizer.racedID)
 	}

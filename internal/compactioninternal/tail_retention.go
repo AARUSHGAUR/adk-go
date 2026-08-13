@@ -273,25 +273,23 @@ func selectTailRetentionWindow(events []*session.Event, retentionSize int, scope
 
 	latest := LatestCompactionEvent(events)
 
-	// Candidates are the events recorded after the previous compaction, by
-	// stream position rather than by timestamp.
+	// Candidates are the events no surviving summary stands in for, wherever
+	// they sit in the stream.
 	//
-	// Timestamps got this wrong at the boundary. The filter excluded anything
-	// not strictly after the previous end, while the new range, seeded with the
-	// previous summary, starts back at the previous start and so covers that
-	// instant. An event stamped exactly at the old end but appended after the
-	// old compaction therefore fell in no window at all and inside the next
-	// recorded range: summarized by nothing, and dropped from every later
-	// prompt. Position has no ties.
-	start := 0
-	if latest != nil {
-		for i, ev := range events {
-			if ev == latest {
-				start = i + 1
-				break
-			}
-		}
-	}
+	// Position was the wrong question and it cost a bound. Each round leaves a
+	// retained tail, and that tail sits before the compaction record written
+	// after it, so a position-based cut never offered it again. While coverage
+	// was a plain interval the next record's widened range swallowed those
+	// events and deleted them, which was a bug, and was also the only thing
+	// keeping the prompt from growing: measured, 66,409 characters at 300 turns
+	// and still climbing, against 256 and flat. Asking what is covered offers
+	// the tail again on the next round, so it is summarized rather than either
+	// deleted or accumulated.
+	//
+	// It also picks up an event a concurrent invocation appended while this
+	// summary was being produced. Such an event is inside the range and named
+	// as a hole, so it is deliberately not covered, and by position it sat
+	// before the record for ever after.
 	// The turn being answered opens with the user's own question, and
 	// summarizing that is summarizing the instruction currently being carried
 	// out. EventRetentionSize cannot protect it, because it counts events and a
@@ -315,11 +313,14 @@ func selectTailRetentionWindow(events []*session.Event, retentionSize int, scope
 	}
 
 	var candidates []*session.Event
-	for _, ev := range events[start:] {
-		if hasCompaction(ev) {
+	for i, ev := range events {
+		if ev == nil || hasCompaction(ev) {
 			continue
 		}
 		if liveHead != "" && ev.ID == liveHead {
+			continue
+		}
+		if coveredByAny(i, ev, events) {
 			continue
 		}
 		candidates = append(candidates, ev)

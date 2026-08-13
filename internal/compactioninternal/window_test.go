@@ -16,6 +16,7 @@ package compactioninternal
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -713,7 +714,7 @@ func TestSlidingWindowMakesProgressAcrossABranchChange(t *testing.T) {
 		}
 		chosen = append(chosen, ids(w))
 
-		summary, err := newSummaryEvent(w, genai.NewContentFromText("summary", "model"), nil)
+		summary, err := newSummaryEvent(w, w, genai.NewContentFromText("summary", "model"), nil)
 		if err != nil {
 			t.Fatalf("pass %d: newSummaryEvent() error = %v", pass, err)
 		}
@@ -728,5 +729,66 @@ func TestSlidingWindowMakesProgressAcrossABranchChange(t *testing.T) {
 	want := [][]string{{"a", "b"}, {"c"}, {"d", "e"}}
 	if diff := cmp.Diff(want, chosen); diff != "" {
 		t.Errorf("windows chosen across passes mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestSlidingWindowRecoversFromABlockedInvocation pins that the window keeps
+// advancing when an invocation stays partly uncompacted.
+//
+// endID resolved from firstNew, and firstNew does not move while nothing is
+// compacted, so once endID's invocation was fully covered the slice bounds
+// inverted and selection returned nil on every later turn. Silently, since an
+// empty window and "nothing to do yet" are the same answer.
+//
+// The trigger is ordinary: a paused run reuses its invocation ID, so a pending
+// tool confirmation produces exactly this shape, and it did not recover when
+// the tool finally answered.
+func TestSlidingWindowRecoversFromABlockedInvocation(t *testing.T) {
+	t.Parallel()
+
+	all := []*session.Event{
+		// inv1 opens a call nothing has answered yet.
+		callEvent("blocked", "inv1", 1, "c-pending"),
+		textEvent("q2", "inv2", 2, "q2"),
+		modelTextEvent("a2", "inv2", 3, "a2"),
+		textEvent("q3", "inv3", 4, "q3"),
+		modelTextEvent("a3", "inv3", 5, "a3"),
+	}
+
+	var chosen [][]string
+	for pass := 1; pass <= 4; pass++ {
+		w := selectSlidingWindow(all, 2, 0)
+		if len(w) == 0 {
+			break
+		}
+		chosen = append(chosen, ids(w))
+		summary, err := newSummaryEvent(w, all, genai.NewContentFromText("summary", "model"), nil)
+		if err != nil {
+			t.Fatalf("pass %d: newSummaryEvent() error = %v", pass, err)
+		}
+		summary.ID = fmt.Sprintf("s%d", pass)
+		summary.InvocationID = fmt.Sprintf("e-compaction-%d", pass)
+		summary.Timestamp = at(10 + pass)
+		all = append(all, summary)
+	}
+
+	if len(chosen) == 0 {
+		t.Fatal("selectSlidingWindow() never chose a window, so compaction is stalled")
+	}
+	// The pending call stays raw and visible, which is what a pending call
+	// needs, and everything behind it is summarized rather than accumulating.
+	for _, w := range chosen {
+		if slices.Contains(w, "blocked") {
+			t.Errorf("window %v covers the pending call", w)
+		}
+	}
+	var covered []string
+	for _, w := range chosen {
+		covered = append(covered, w...)
+	}
+	for _, want := range []string{"q2", "a2", "q3", "a3"} {
+		if !slices.Contains(covered, want) {
+			t.Errorf("event %q was never summarized across %v", want, chosen)
+		}
 	}
 }

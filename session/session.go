@@ -294,23 +294,26 @@ type EventCompaction struct {
 	// prompt.
 	CompactedContent *genai.Content `json:"compactedContent"`
 
-	// CoveredEventIDs are the IDs of the events this summary replaces. It is
-	// the authoritative answer to what a compaction covers; the timestamp range
-	// above is a bounding box over it and a cheap way to rule an event out.
+	// ExcludedEventIDs are the events inside the range above that this summary
+	// does NOT stand in for. Everything else in the range is covered.
 	//
-	// The range alone could not say it. Choosing a window filters events out of
-	// the middle of a span, by branch, by isolation scope and by what the
-	// retained tail holds back, so an interval covering the ends also covers
-	// the gaps. An event in a gap was deleted from every later prompt having
-	// been summarized by nothing, and its content was simply lost. A set has no
-	// gaps, and it can describe a window with a hole in it, which an interval
-	// cannot.
+	// The range alone was not enough. Choosing a window filters events out of
+	// the middle of its own span, by branch, by isolation scope and by what a
+	// retained tail holds back, so an interval covering the ends also covered
+	// the gaps. An event in a gap was dropped from every later prompt having
+	// been summarized by nothing, and its content was simply lost.
 	//
-	// An event whose ID is absent is not covered, even when its timestamp falls
-	// inside the range. That direction is deliberate: failing to cover one
-	// leaves it raw in the prompt beside a summary of it, which is visible and
-	// recoverable, where over-covering deletes it silently.
-	CoveredEventIDs []string `json:"coveredEventIds,omitempty"`
+	// Recording the holes rather than the membership keeps this bounded. Holes
+	// are rare, none at all in a single-agent conversation, so this is normally
+	// empty where a membership list would carry one entry per event of the
+	// conversation, for ever, recopied on every rolling summary.
+	//
+	// It also fails in the safe direction. An ID that does not match anything,
+	// which is what a storage backend that reassigns event IDs leaves behind,
+	// excludes nothing and the range stands on its own. The inverse list would
+	// match nothing, cover nothing, and leave compaction paying for summaries
+	// that never shrink a prompt.
+	ExcludedEventIDs []string `json:"excludedEventIds,omitempty"`
 }
 
 // clone returns a deep copy, or nil for a nil receiver.
@@ -325,7 +328,7 @@ func (c *EventCompaction) clone() *EventCompaction {
 		return nil
 	}
 	out := *c
-	out.CoveredEventIDs = slices.Clone(c.CoveredEventIDs)
+	out.ExcludedEventIDs = slices.Clone(c.ExcludedEventIDs)
 	if c.CompactedContent != nil {
 		content := *c.CompactedContent
 		content.Parts = slices.Clone(c.CompactedContent.Parts)

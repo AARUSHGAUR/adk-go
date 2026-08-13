@@ -492,7 +492,7 @@ func TestApplyKeepsAnEventTheSummaryDidNotCover(t *testing.T) {
 
 	// The summary spans a..d but stands in only for a and d. Whatever kept b
 	// and c out of the window, they were handed to no summarizer.
-	summary := compactionEvent("s1", 9, 1, 4, "summary of a and d", "a", "d")
+	summary := compactionEvent("s1", 9, 1, 4, "summary of a and d", "b", "c")
 	events := []*session.Event{
 		textEvent("a", "inv1", 1, "q1"),
 		textEvent("b", "inv1", 2, "sibling branch"),
@@ -521,7 +521,7 @@ func TestApplyKeepsAnEventTiedToTheWindowHead(t *testing.T) {
 		textEvent("x", "inv1", 1, "tied to the head, never summarized"),
 		textEvent("a", "inv1", 1, "q1"),
 		modelTextEvent("b", "inv1", 3, "a1"),
-		compactionEvent("s1", 9, 1, 3, "summary of a and b", "a", "b"),
+		compactionEvent("s1", 9, 1, 3, "summary of a and b", "x"),
 	}
 
 	// x keeps its place ahead of the summary, which is emitted where the first

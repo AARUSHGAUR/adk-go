@@ -43,7 +43,7 @@ import (
 // non-nil and hold prose. usage may be nil. Bad input is an error rather than
 // a silently broken event, because a compaction that stands for nothing still
 // costs a model call and still leaves the prompt as large as it was.
-func newSummaryEvent(events []*session.Event, summary *genai.Content, usage *genai.GenerateContentResponseUsageMetadata) (*session.Event, error) {
+func newSummaryEvent(events, all []*session.Event, summary *genai.Content, usage *genai.GenerateContentResponseUsageMetadata) (*session.Event, error) {
 	if len(events) == 0 {
 		return nil, fmt.Errorf("cannot summarize an empty event list")
 	}
@@ -116,29 +116,37 @@ func newSummaryEvent(events []*session.Event, summary *genai.Content, usage *gen
 	// filters exist to enforce.
 	branch, scope := events[0].Branch, events[0].IsolationScope
 
-	// The events this summary stands in for, named rather than described by
-	// their span. Everything the window filtered out keeps its place in the
-	// prompt, whatever its timestamp says.
+	// The holes: events inside the range that this summary does not stand in
+	// for, because window selection filtered them out. Everything else in the
+	// range is covered, so the common case, a window with no holes in it,
+	// records nothing here at all.
 	//
-	// An event with no ID is left out. It cannot be named, so it cannot be
-	// covered, and leaving it raw beside a summary of it is the recoverable
-	// half of that choice. AppendEvent assigns an ID to anything that arrives
-	// without one, so a stored event reaching here should always have one.
-	covered := make([]string, 0, len(events))
+	// An event with no ID cannot be named, so it cannot be excluded either. It
+	// therefore reads as covered, which is the same answer the range alone gave
+	// before any of this existed. AppendEvent assigns an ID to anything that
+	// arrives without one, so a stored event reaching here should always have
+	// one to name.
+	summarized := make(map[string]struct{}, len(events))
 	for _, ev := range events {
 		if ev.ID != "" {
-			covered = append(covered, ev.ID)
-		}
-		// A summary in the window is a rolling seed: this compaction restates
-		// it, so it stands in for what that one stood in for as well.
-		// Otherwise the older record would keep covering events this one does
-		// not, and both would be materialized into the same prompt.
-		if c := ev.Actions.Compaction; c != nil {
-			covered = append(covered, c.CoveredEventIDs...)
+			summarized[ev.ID] = struct{}{}
 		}
 	}
-	slices.Sort(covered)
-	covered = slices.Compact(covered)
+	var excluded []string
+	for _, ev := range all {
+		if ev == nil || ev.ID == "" || hasCompaction(ev) {
+			continue
+		}
+		if ev.Timestamp.Before(start) || ev.Timestamp.After(end) {
+			continue
+		}
+		if _, ok := summarized[ev.ID]; ok {
+			continue
+		}
+		excluded = append(excluded, ev.ID)
+	}
+	slices.Sort(excluded)
+	excluded = slices.Compact(excluded)
 
 	return &session.Event{
 		// Authored as "user" because a summary is injected context rather than
@@ -152,7 +160,7 @@ func newSummaryEvent(events []*session.Event, summary *genai.Content, usage *gen
 				StartTimestamp:   start,
 				EndTimestamp:     end,
 				CompactedContent: &content,
-				CoveredEventIDs:  covered,
+				ExcludedEventIDs: excluded,
 			},
 		},
 		LLMResponse: model.LLMResponse{UsageMetadata: usage},

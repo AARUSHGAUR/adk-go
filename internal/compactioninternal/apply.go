@@ -336,21 +336,36 @@ func RangeRaced(latest, selectedFrom session.Session, summary *session.Event) bo
 	return false
 }
 
-// overlaps reports whether two compactions stand in for any of the same events.
+// coveredByAny reports whether any compaction in events stands in for the event
+// at index i.
 //
-// Their ID sets answer it exactly. Falling back to comparing spans covers a
-// record built by hand with no IDs, where any intersection of the two intervals
-// has to be treated as an overlap.
+// Only a compaction appearing later in the stream counts, matching coveredBy
+// and therefore matching what prompt assembly actually drops. A summary never
+// stands in for an event recorded after it was written, and an event tied to
+// the previous range's end but appended afterwards is the case that makes the
+// difference: prompt assembly keeps it, so selection has to offer it, or it is
+// covered by the next range without ever having been summarized.
+func coveredByAny(i int, ev *session.Event, events []*session.Event) bool {
+	for j, other := range events {
+		if j <= i || !hasCompaction(other) {
+			continue
+		}
+		if inRange(ev, other.Actions.Compaction) {
+			return true
+		}
+	}
+	return false
+}
+
+// overlaps reports whether two compactions could stand in for any of the same
+// events.
+//
+// Intersecting intervals is the answer, and deliberately the conservative one:
+// two records whose spans meet may or may not share an event once exclusions
+// are applied, and treating a maybe as an overlap costs one discarded summary
+// where the opposite costs the same content materialized into a prompt twice.
 func overlaps(a, b *session.EventCompaction) bool {
 	if a == nil || b == nil {
-		return false
-	}
-	if len(a.CoveredEventIDs) > 0 && len(b.CoveredEventIDs) > 0 {
-		for _, id := range b.CoveredEventIDs {
-			if slices.Contains(a.CoveredEventIDs, id) {
-				return true
-			}
-		}
 		return false
 	}
 	return !a.StartTimestamp.After(b.EndTimestamp) && !b.StartTimestamp.After(a.EndTimestamp)
@@ -439,16 +454,11 @@ func UnwrapSession(s session.Session) session.Session {
 // authorised deletion, and coverage is the one where a disagreement deletes
 // conversation, so it gets exactly one definition.
 //
-// The timestamp range is a bounding box and rules an event out cheaply. The ID
-// set decides, and an event the set does not name is not covered whatever its
-// timestamp says: choosing a window filters events out of the middle of its own
-// span, so an interval that covers the ends covers the gaps too.
-//
-// A record with no ID set at all falls back to the range. Nothing writes one
-// today, since newSummaryEvent always lists what it covered, but the field is
-// on an exported struct that a caller can build by hand, and treating an empty
-// list as "covers nothing" would make such a record delete its covered events
-// from the prompt while substituting a summary for none of them.
+// The range says what a summary stands in for and the exclusion list says which
+// events inside it were left out, because window selection filters events out
+// of the middle of its own span. An ID that names nothing excludes nothing,
+// which is the safe direction: coverage falls back to the plain interval rather
+// than collapsing to nothing.
 func inRange(ev *session.Event, rng *session.EventCompaction) bool {
 	if ev == nil || rng == nil {
 		return false
@@ -456,8 +466,5 @@ func inRange(ev *session.Event, rng *session.EventCompaction) bool {
 	if ev.Timestamp.Before(rng.StartTimestamp) || ev.Timestamp.After(rng.EndTimestamp) {
 		return false
 	}
-	if len(rng.CoveredEventIDs) == 0 {
-		return true
-	}
-	return slices.Contains(rng.CoveredEventIDs, ev.ID)
+	return !slices.Contains(rng.ExcludedEventIDs, ev.ID)
 }

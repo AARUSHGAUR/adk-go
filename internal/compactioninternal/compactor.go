@@ -172,7 +172,7 @@ func summarizeTraced(ctx context.Context, cfg *compaction.Config, sess session.S
 		// it, so a summarizer that spent a call and got nothing usable back is
 		// distinguishable from one that never tried.
 	default:
-		summary, err = newSummaryEvent(window, content, usage)
+		summary, err = newSummaryEvent(window, collect(sess), content, usage)
 	}
 	// Stamped only once the result is known to be usable, so a discarded
 	// summary never spends a UUID or hands telemetry the identity of something

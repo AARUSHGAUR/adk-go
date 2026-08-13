@@ -479,7 +479,7 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 						StartTimestamp:   start,
 						EndTimestamp:     end,
 						CompactedContent: genai.NewContentFromText("summary of earlier turns", "model"),
-						CoveredEventIDs:  []string{"turn-1", "turn-2"},
+						ExcludedEventIDs: []string{"turn-1", "turn-2"},
 					},
 				},
 			}
@@ -513,8 +513,8 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			// The covered set is what prompt assembly deletes on. A backend
 			// that drops it leaves a record whose range still spans the covered
 			// turns, so the summary silently widens to everything in between.
-			if diff := cmp.Diff([]string{"turn-1", "turn-2"}, c.CoveredEventIDs); diff != "" {
-				t.Errorf("covered event IDs mismatch (-want +got):\n%s", diff)
+			if diff := cmp.Diff([]string{"turn-1", "turn-2"}, c.ExcludedEventIDs); diff != "" {
+				t.Errorf("excluded event IDs mismatch (-want +got):\n%s", diff)
 			}
 		})
 

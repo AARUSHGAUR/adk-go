@@ -34,7 +34,7 @@ func TestNewSummaryEvent(t *testing.T) {
 	}
 	summaryContent := utils.Content(modelTextEvent("x", "inv1", 0, "the summary"))
 
-	got, err := newSummaryEvent(events, summaryContent, nil)
+	got, err := newSummaryEvent(events, events, summaryContent, nil)
 	if err != nil {
 		t.Fatalf("newSummaryEvent() error = %v", err)
 	}
@@ -88,7 +88,7 @@ func TestNewSummaryEventRejectsBadInput(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := newSummaryEvent(tc.events, tc.summary, nil)
+			_, err := newSummaryEvent(tc.events, tc.events, tc.summary, nil)
 			if gotErr := err != nil; gotErr != tc.wantErr {
 				t.Errorf("newSummaryEvent() error = %v, wantErr %t", err, tc.wantErr)
 			}
@@ -114,7 +114,7 @@ func TestNewSummaryEventKeepsPartMetadata(t *testing.T) {
 		ThoughtSignature: []byte("opaque-signature"),
 	}}}
 
-	got, err := newSummaryEvent(events, summary, nil)
+	got, err := newSummaryEvent(events, events, summary, nil)
 	if err != nil {
 		t.Fatalf("newSummaryEvent() error = %v", err)
 	}
@@ -141,7 +141,7 @@ func TestNewSummaryEventRejectsProselessSummary(t *testing.T) {
 		FunctionCall: &genai.FunctionCall{Name: "transfer_funds"},
 	}}}
 
-	if _, err := newSummaryEvent(events, summary, nil); err == nil {
+	if _, err := newSummaryEvent(events, events, summary, nil); err == nil {
 		t.Error("newSummaryEvent() accepted a summary with no prose, want an error rather than an empty summary")
 	}
 }
@@ -159,7 +159,7 @@ func TestCompactionEventIsNotAFinalResponse(t *testing.T) {
 		{Timestamp: time.Unix(1, 0)},
 		{Timestamp: time.Unix(2, 0)},
 	}
-	got, err := newSummaryEvent(events, genai.NewContentFromText("the summary", "model"), nil)
+	got, err := newSummaryEvent(events, events, genai.NewContentFromText("the summary", "model"), nil)
 	if err != nil {
 		t.Fatalf("newSummaryEvent() error = %v", err)
 	}
@@ -189,7 +189,7 @@ func TestNewSummaryEventBoundsAnOutOfOrderWindow(t *testing.T) {
 		{ID: "c", Timestamp: time.Unix(5, 0)},
 	}
 
-	got, err := newSummaryEvent(events, genai.NewContentFromText("s", "model"), nil)
+	got, err := newSummaryEvent(events, events, genai.NewContentFromText("s", "model"), nil)
 	if err != nil {
 		t.Fatalf("newSummaryEvent() error = %v", err)
 	}
@@ -198,8 +198,9 @@ func TestNewSummaryEventBoundsAnOutOfOrderWindow(t *testing.T) {
 		t.Errorf("range = [%v, %v], want the true bounds [%v, %v]",
 			c.StartTimestamp, c.EndTimestamp, time.Unix(1, 0), time.Unix(9, 0))
 	}
-	if diff := cmp.Diff([]string{"a", "b", "c"}, c.CoveredEventIDs); diff != "" {
-		t.Errorf("covered IDs mismatch (-want +got):\n%s", diff)
+	// Every event in the window was summarized, so there are no holes to name.
+	if len(c.ExcludedEventIDs) != 0 {
+		t.Errorf("ExcludedEventIDs = %v, want none: the window has no holes", c.ExcludedEventIDs)
 	}
 }
 
@@ -215,7 +216,7 @@ func TestNewSummaryEventRejectsThoughtOnlySummary(t *testing.T) {
 	events := []*session.Event{{Timestamp: time.Unix(1, 0)}, {Timestamp: time.Unix(2, 0)}}
 	summary := &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "thinking about it", Thought: true}}}
 
-	if _, err := newSummaryEvent(events, summary, nil); err == nil {
+	if _, err := newSummaryEvent(events, events, summary, nil); err == nil {
 		t.Error("newSummaryEvent() accepted a thought-only summary")
 	}
 }
@@ -236,7 +237,7 @@ func TestNewSummaryEventDropsThoughtsFromAMixedSummary(t *testing.T) {
 		{Text: "The user asked about the weather in Zurich."},
 	}}
 
-	got, err := newSummaryEvent(events, summary, nil)
+	got, err := newSummaryEvent(events, events, summary, nil)
 	if err != nil {
 		t.Fatalf("newSummaryEvent() error = %v", err)
 	}

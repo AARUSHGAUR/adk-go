@@ -148,7 +148,7 @@ func isCompactionSubsumed(i int, rng *session.EventCompaction, events []*session
 			continue
 		}
 		if o.StartTimestamp.Before(rng.StartTimestamp) || o.EndTimestamp.After(rng.EndTimestamp) ||
-			len(o.CoveredEventIDs) > len(rng.CoveredEventIDs) || j > i {
+			len(o.ExcludedEventIDs) < len(rng.ExcludedEventIDs) || j > i {
 			return true
 		}
 	}
@@ -194,7 +194,7 @@ func selectSlidingWindow(events []*session.Event, interval, overlap int) []*sess
 	// even when the cut does not reach the end of a turn.
 	var order []string
 	isNew := make(map[string]bool)
-	for _, ev := range events {
+	for i, ev := range events {
 		if hasCompaction(ev) || ev.InvocationID == "" {
 			continue
 		}
@@ -202,7 +202,7 @@ func selectSlidingWindow(events []*session.Event, interval, overlap int) []*sess
 			order = append(order, ev.InvocationID)
 			isNew[ev.InvocationID] = false
 		}
-		if !coveredByAny(ev, events) {
+		if !coveredByAny(i, ev, events) {
 			isNew[ev.InvocationID] = true
 		}
 	}
@@ -232,8 +232,22 @@ func selectSlidingWindow(events []*session.Event, interval, overlap int) []*sess
 	// over a strictly larger window and is more likely to fail again. Capping
 	// makes a retry the same size as the attempt that failed, and drains any
 	// backlog one bounded window per turn.
+	// The end is the interval-th invocation that still needs summarizing, not
+	// the interval-th invocation outright.
+	//
+	// Counting covered ones lets a single invocation that can never be
+	// compacted, a call awaiting approval being the ordinary case, pin the
+	// start and hold the end one step behind it for ever. The interval means
+	// "this many turns of new conversation", so covered turns should not spend
+	// it.
+	newPositions := make([]int, 0, newCount)
+	for i, id := range order {
+		if isNew[id] {
+			newPositions = append(newPositions, i)
+		}
+	}
 	startID := order[max(0, firstNew-overlap)]
-	endID := order[min(len(order)-1, firstNew+interval-1)]
+	endID := order[newPositions[min(len(newPositions)-1, interval-1)]]
 
 	// Where each invocation sits in the sequence, so an already-summarized
 	// event can be told apart from one deliberately pulled back by overlap.
@@ -243,8 +257,8 @@ func selectSlidingWindow(events []*session.Event, interval, overlap int) []*sess
 	for i, id := range order {
 		position[id] = i
 	}
-	staleAt := func(ev *session.Event) bool {
-		return position[ev.InvocationID] >= firstNew && coveredByAny(ev, events)
+	staleAt := func(idx int, ev *session.Event) bool {
+		return position[ev.InvocationID] >= firstNew && coveredByAny(idx, ev, events)
 	}
 
 	// Slice from the first uncovered event of startID through the last of
@@ -257,15 +271,31 @@ func selectSlidingWindow(events []*session.Event, interval, overlap int) []*sess
 	// would fall in the same spot, and the window would never move. Events an
 	// overlap deliberately pulls back are not skipped, since re-summarizing
 	// them is the whole point of overlap.
+	// Bounded by where the chosen invocations sit in the sequence, not by the
+	// last live event of endID specifically.
+	//
+	// Anchoring on endID could put first past last and return nil for ever.
+	// endID resolves from firstNew, which does not move while nothing is
+	// compacted, so once that invocation is fully covered, or its last live
+	// event precedes startID's first, every later turn recomputed the same
+	// empty answer. Silently: an empty window is indistinguishable from
+	// "nothing to do yet". Reached by an ordinary pending tool confirmation,
+	// where a paused run reuses its invocation ID, as well as by a
+	// late-resuming invocation, and it did not recover when the tool answered.
+	endPos := position[endID]
 	first, last := -1, -1
 	for i, ev := range events {
-		if hasCompaction(ev) || staleAt(ev) {
+		if hasCompaction(ev) || staleAt(i, ev) {
 			continue
 		}
-		if first < 0 && ev.InvocationID == startID {
+		pos, known := position[ev.InvocationID]
+		if !known {
+			continue
+		}
+		if first < 0 && pos >= position[startID] {
 			first = i
 		}
-		if ev.InvocationID == endID {
+		if pos <= endPos {
 			last = i
 		}
 	}
@@ -274,13 +304,13 @@ func selectSlidingWindow(events []*session.Event, interval, overlap int) []*sess
 	}
 
 	window := make([]*session.Event, 0, last-first+1)
-	for _, ev := range events[first : last+1] {
+	for off, ev := range events[first : last+1] {
 		// Prior summaries are bookkeeping rather than conversation, and an
 		// event a summary already stands in for is not re-summarized unless
 		// overlap asked for it. Summaries themselves are never re-summarized,
 		// so a sliding-window compaction is a constant-factor reduction rather
 		// than a bound; tail retention is what bounds prompt growth.
-		if hasCompaction(ev) || staleAt(ev) {
+		if hasCompaction(ev) || staleAt(first+off, ev) {
 			continue
 		}
 		window = append(window, ev)
@@ -395,33 +425,22 @@ func answersAnyOf(events []*session.Event, ids map[string]struct{}) bool {
 
 // coversAllOf reports whether a stands in for every event b does.
 //
-// The ID sets answer it exactly. When either record carries none, which only a
-// hand-built one does, containment of the timestamp ranges is the best
-// available answer.
+// a's range has to contain b's, and a must not exclude anything b covers.
+// Discarding a record whose events the survivor does not cover would leave
+// those events represented by nothing at all, which is the failure this whole
+// model exists to remove.
 func coversAllOf(a, b *session.EventCompaction) bool {
 	if a == nil || b == nil {
 		return false
 	}
-	if len(a.CoveredEventIDs) > 0 && len(b.CoveredEventIDs) > 0 {
-		for _, id := range b.CoveredEventIDs {
-			if !slices.Contains(a.CoveredEventIDs, id) {
-				return false
-			}
-		}
-		return true
+	if a.StartTimestamp.After(b.StartTimestamp) || a.EndTimestamp.Before(b.EndTimestamp) {
+		return false
 	}
-	return !a.StartTimestamp.After(b.StartTimestamp) && !a.EndTimestamp.Before(b.EndTimestamp)
-}
-
-// coveredByAny reports whether any compaction in events stands in for ev.
-func coveredByAny(ev *session.Event, events []*session.Event) bool {
-	for _, other := range events {
-		if !hasCompaction(other) {
-			continue
-		}
-		if inRange(ev, other.Actions.Compaction) {
-			return true
+	for _, id := range a.ExcludedEventIDs {
+		// An event a leaves out is fine only if b leaves it out too.
+		if !slices.Contains(b.ExcludedEventIDs, id) {
+			return false
 		}
 	}
-	return false
+	return true
 }
