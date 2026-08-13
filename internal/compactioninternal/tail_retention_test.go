@@ -178,7 +178,14 @@ func TestSelectTailRetentionWindowSeedsPreviousSummary(t *testing.T) {
 
 	// Summarizing this window must produce a range that strictly contains the
 	// old one, so Apply treats the old summary as subsumed.
-	summary, err := newSummaryEvent(window, window, genai.NewContentFromText("new summary", "model"), nil)
+	//
+	// The whole event list is passed as the second argument, which is what the
+	// compactor does. Passing the window there instead lets the test agree with
+	// itself: holes are found by scanning everything in the range the window
+	// left out, and if the scan only sees the window there is nothing to find.
+	// Events a and b are the ones that matter, covered by s1 and therefore
+	// absent from the window that rolls s1 up.
+	summary, err := newSummaryEvent(window, events, genai.NewContentFromText("new summary", "model"), nil)
 	if err != nil {
 		t.Fatalf("newSummaryEvent() error = %v", err)
 	}
@@ -187,7 +194,16 @@ func TestSelectTailRetentionWindowSeedsPreviousSummary(t *testing.T) {
 		t.Errorf("new summary starts at %v, want %v so it covers the old range",
 			summary.Actions.Compaction.StartTimestamp, at(1))
 	}
+	// Nothing in the range is a hole. a and b are represented by the summary
+	// the window rolled up, and the rest of the range is the window itself.
+	if got := summary.Actions.Compaction.ExcludedEvents; len(got) != 0 {
+		t.Errorf("new summary excludes %v, want nothing: an event an earlier summary covers is covered by this one too", got)
+	}
 
+	// s1 is gone rather than sitting beside s2. A rolling summary that cannot
+	// subsume the one it was built from leaves both in the prompt, and the pass
+	// after that leaves three, which is growth proportional to the length of
+	// the conversation.
 	got := ids(Apply(append(events, summary)))
 	if diff := cmp.Diff([]string{"s2", "e", "f"}, got); diff != "" {
 		t.Errorf("after the rolling compaction, prompt events mismatch (-want +got):\n%s", diff)

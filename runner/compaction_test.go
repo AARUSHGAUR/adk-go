@@ -1438,10 +1438,18 @@ func TestTailRetentionKeepsThePromptBounded(t *testing.T) {
 	// model does. A fixed count would make the progress gate correctly conclude
 	// that compaction never helps and latch off, which is a different test.
 	m := &proportionalUsageModel{}
+	// A summary the size a real one is, roughly 500 characters, rather than a
+	// short marker. Size is what makes this test load-bearing: the failure it
+	// guards against is one summary per pass surviving into the prompt instead
+	// of each superseding the last, and with a seven-character summary sixty
+	// turns of that is still a small prompt, so the assertion below passes
+	// while the property is broken. At this length the same defect measured
+	// 24,991 characters against 551.
+	summaryText := strings.Repeat("summary text ", 40)
 	r, _ := newCompactionRunner(t, m, &compaction.Config{
 		TokenThreshold:     200,
 		EventRetentionSize: 2,
-		Summarizer:         &recordingSummarizer{summary: "SUMMARY"},
+		Summarizer:         &recordingSummarizer{summary: summaryText},
 	})
 
 	var early, late int
@@ -1470,6 +1478,23 @@ func TestTailRetentionKeepsThePromptBounded(t *testing.T) {
 	if late > early*2 {
 		t.Errorf("prompt grew from %d characters at turn %d to %d at turn %d: tail retention is not bounding it",
 			early, rounds/3, late, rounds-1)
+	}
+
+	// The mechanism, stated separately from the symptom. A rolling summary is
+	// supposed to replace the one it was built from, so however many passes
+	// ran, one summary reaches the model. Counting them says which way a size
+	// regression went, and catches the accumulation before it is large enough
+	// to move the total.
+	summaries := 0
+	for _, c := range m.lastPrompt() {
+		for _, p := range c.Parts {
+			if strings.Contains(p.Text, summaryText) {
+				summaries++
+			}
+		}
+	}
+	if summaries > 1 {
+		t.Errorf("final prompt carries %d summaries, want 1: each pass is adding a summary rather than superseding the last", summaries)
 	}
 }
 

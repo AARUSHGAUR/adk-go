@@ -130,6 +130,31 @@ func newSummaryEvent(events, all []*session.Event, summary *genai.Content, usage
 	for _, ev := range events {
 		summarized[refKey(ev)] = struct{}{}
 	}
+
+	// A window rolling up an earlier summary carries it as its first element,
+	// so everything that summary stood for is inside the new range while being
+	// absent from the window. Those events are represented, transitively, and
+	// recording them as holes is what makes a rolling summary fail to replace
+	// the one it was built from: the new record then leaves out events the old
+	// one covered, so it cannot subsume it, and every pass adds another summary
+	// to the prompt instead of superseding the last. The exclusion list grows
+	// with the session on top of that, since each pass inherits the previous
+	// pass's holes.
+	var rolled []*session.EventCompaction
+	for _, ev := range events {
+		if hasCompaction(ev) {
+			rolled = append(rolled, ev.Actions.Compaction)
+		}
+	}
+	covered := func(ev *session.Event) bool {
+		for _, rng := range rolled {
+			if inRange(ev, rng) && !excludes(rng, ev) {
+				return true
+			}
+		}
+		return false
+	}
+
 	var excluded []session.EventRef
 	seen := make(map[string]struct{})
 	for _, ev := range all {
@@ -144,6 +169,9 @@ func newSummaryEvent(events, all []*session.Event, summary *genai.Content, usage
 			continue
 		}
 		if _, ok := seen[k]; ok {
+			continue
+		}
+		if covered(ev) {
 			continue
 		}
 		seen[k] = struct{}{}
