@@ -171,17 +171,31 @@ EOF
   return 1
 }
 
-# Prints every PR number already referenced on v1, one per line. Covers both
-# landed commits and in-flight backport PRs, so a queued PR disappears as soon
-# as someone picks it up.
+# Prints every PR number already backported to v1, one per line. Covers landed
+# commits and in-flight backport PRs alike, so a queued PR disappears as soon as
+# someone picks it up.
+#
+# Only the places that actually *record* a backport are read: the commit
+# subject, where GitHub's squash puts "(#N)" and where a batched backport lists
+# every number it carries, and the "* subject (#N)" bullets a squash leaves in
+# the body for the commits it folded in. Bodies are otherwise prose and full of
+# numbers that mean something else — "Fixes google/adk-go#1152" names an issue,
+# and one v1 commit explains it bumped dependencies "rather than a cherry-pick
+# of main's Dependabot commits (#1021, #1144, ...)", naming seven PRs precisely
+# because they were *not* backported. Matching those would silently drop a real
+# fix from the queue, which is the one failure this tool must not have.
 backported_prs() {
   local remote="$1" base
+  local bullet='^[[:space:]]*\*[[:space:]].*\(#[0-9]+\)[[:space:]]*$'
   base="$(git merge-base "${remote}/${MAIN_BRANCH}" "${remote}/${V1_BRANCH}")"
-  git log --format='%s%n%b' "${base}..${remote}/${V1_BRANCH}" |
-    grep -oE '#[0-9]+' | tr -d '#' || true
-  gh pr list --repo "${REPO}" --base "${V1_BRANCH}" --state open --limit 200 \
-    --json title,body --jq '.[] | "\(.title)\n\(.body)"' |
-    grep -oE '#[0-9]+' | tr -d '#' || true
+  {
+    git log --format='%s' "${base}..${remote}/${V1_BRANCH}"
+    git log --format='%b' "${base}..${remote}/${V1_BRANCH}" | grep -E "${bullet}" || true
+    # Titles only: every PR this script opens carries its numbers there, in the
+    # trailing "(#N)" of a single backport or the "(#a, #b, #c)" of a batch.
+    gh pr list --repo "${REPO}" --base "${V1_BRANCH}" --state open --limit 200 \
+      --json title --jq '.[].title'
+  } | grep -oE '#[0-9]+' | tr -d '#' || true
 }
 
 # Prints "number<TAB>title" for each pending PR, oldest merge first.
