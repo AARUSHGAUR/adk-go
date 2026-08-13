@@ -141,16 +141,16 @@ func New(cfg Config) (*Runner, error) {
 	}, nil
 }
 
-// resolveCompactionConfig validates cfg and fills in the default summarizer.
-//
-// Resolving at construction time means a misconfigured runner fails fast at
-// New, rather than silently skipping compaction turns later, or blowing up
-// mid-conversation the first time a compaction triggers.
 // defaultSummarizerTimeout bounds the summarization call the runner installs
 // when an application enables compaction without naming a Summarizer. A var so
 // a test can shorten it rather than waiting a minute to prove the bound exists.
 var defaultSummarizerTimeout = 60 * time.Second
 
+// resolveCompactionConfig validates cfg and fills in the default summarizer.
+//
+// Resolving at construction time means a misconfigured runner fails fast at
+// New, rather than silently skipping compaction turns later, or blowing up
+// mid-conversation the first time a compaction triggers.
 func resolveCompactionConfig(cfg *compaction.Config, rootAgent agent.Agent) (*compaction.Config, error) {
 	if cfg == nil {
 		return nil, nil
@@ -229,6 +229,14 @@ type Runner struct {
 	compactionConfig *compaction.Config
 }
 
+// invocationIDOf returns the invocation an InvocationContext names, or "".
+func invocationIDOf(ictx agent.InvocationContext) string {
+	if ictx == nil {
+		return ""
+	}
+	return ictx.InvocationID()
+}
+
 // compactAfterInvocation runs post-invocation sliding-window compaction and
 // persists the summary, if one was produced.
 //
@@ -243,14 +251,6 @@ type Runner struct {
 //
 // The summary itself is deliberately not yielded to the caller. It is
 // bookkeeping for the next prompt, not part of the conversation.
-// invocationIDOf returns the invocation an InvocationContext names, or "".
-func invocationIDOf(ictx agent.InvocationContext) string {
-	if ictx == nil {
-		return ""
-	}
-	return ictx.InvocationID()
-}
-
 func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession session.Session, ictx agent.InvocationContext) error {
 	if !compactioninternal.HasSlidingWindow(r.compactionConfig) {
 		return nil
@@ -383,6 +383,32 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	}
 	finish(nil, "")
 	return nil
+}
+
+// fromPlugin returns the event a plugin gave back, with the compaction record
+// the framework put on the original rather than any the plugin supplied.
+//
+// A compaction record is not content. It says which stored events every later
+// prompt drops and what stands in for them, so planting one erases history and
+// substitutes text of the planter's choosing, and the substituted text is not
+// filtered the way a summary is. session.EventActions.Compaction says the
+// framework writes this field, and for tools and callbacks that is enforced:
+// agent.eventActionsFrom, the tool path in base_flow, and workflow.ToolNode all
+// clear it. Plugins were the one hook where a returned event was persisted as
+// given.
+//
+// The record is restored rather than cleared, because an ordinary event should
+// carry none and a summary carries the real one. Both cases are then the same
+// rule: whatever the framework decided, not whatever came back.
+//
+// The post-invocation summary path does not use this. A plugin is invited to
+// rewrite a summary there, and SanitizeSummary re-checks the result.
+func fromPlugin(original, modified *session.Event) *session.Event {
+	if modified == nil || modified == original {
+		return original
+	}
+	modified.Actions.Compaction = original.Actions.Compaction
+	return modified
 }
 
 // compactionRuntime returns the runtime that the request processors read off
@@ -637,9 +663,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 					}
 					continue
 				}
-				if modifiedEvent != nil {
-					event = modifiedEvent
-				}
+				event = fromPlugin(event, modifiedEvent)
 			}
 
 			// only commit non-partial event to a session service
@@ -846,9 +870,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					}
 					continue
 				}
-				if modifiedEvent != nil {
-					event = modifiedEvent
-				}
+				event = fromPlugin(event, modifiedEvent)
 			}
 
 			// Chronological event buffering logic for Live streaming.

@@ -226,9 +226,7 @@ func (r *Runner) runNode(
 				}
 				continue
 			}
-			if modifiedEvent != nil {
-				event = modifiedEvent
-			}
+			event = fromPlugin(event, modifiedEvent)
 		}
 
 		if !event.LLMResponse.Partial {

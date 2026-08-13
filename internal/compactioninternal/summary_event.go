@@ -54,9 +54,10 @@ func newSummaryEvent(events, all []*session.Event, summary *genai.Content, usage
 	if !hasProse(summary) {
 		return nil, fmt.Errorf("summary content is empty, so compacting would delete the covered events and replace them with nothing")
 	}
-	// NewSummaryEvent is exported and called by third-party Summarizer
-	// implementations, so a nil element is an input to reject rather than a
-	// panic to hand back.
+	// The window arrives from window selection rather than from a literal, and
+	// the snapshot handed to a summarizer preserves nil elements, so a nil here
+	// is an input to reject rather than a panic to hand back from the middle of
+	// a turn whose tools have already run.
 	for i, ev := range events {
 		if ev == nil {
 			return nil, fmt.Errorf("events[%d] is nil", i)
