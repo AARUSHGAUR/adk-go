@@ -29,6 +29,8 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
@@ -276,18 +278,29 @@ func TestDecodeRequestBody_RejectsUnknownFields(t *testing.T) {
 }
 
 // TestNewRuntimeAPIController_BackwardCompatible pins that the constructor
-// still accepts its original argument list. The compaction option was added
-// variadically precisely so existing callers -- including the three
-// examples/bidi programs -- keep compiling.
+// keeps the signature it was released with, and that the options live on a
+// sibling rather than on a trailing variadic parameter grown onto it.
+//
+// The assertion is the declared type of runtimeCtor below, not anything in the
+// body. A call expression cannot do this job: it keeps compiling when the
+// function it calls gains a trailing variadic, which is exactly the change that
+// breaks a caller using the identifier as a value.
 func TestNewRuntimeAPIController_BackwardCompatible(t *testing.T) {
-	c := NewRuntimeAPIControllerWithOptions(nil, nil, nil, nil, 10*time.Second, runner.PluginConfig{}, false)
+	c := runtimeCtor(nil, nil, nil, nil, 10*time.Second, runner.PluginConfig{}, false)
 	if c == nil {
-		t.Fatal("NewRuntimeAPIControllerWithOptions() with no options returned nil")
+		t.Fatal("NewRuntimeAPIController() returned nil")
 	}
 	if c.eventsCompactionConfig != nil {
-		t.Errorf("eventsCompactionConfig = %v, want nil when the option is not supplied", c.eventsCompactionConfig)
+		t.Errorf("eventsCompactionConfig = %v, want nil when no option is supplied", c.eventsCompactionConfig)
 	}
 }
+
+// runtimeCtor fails to compile if [NewRuntimeAPIController] changes shape.
+var runtimeCtor NewRuntimeAPIControllerFunc = NewRuntimeAPIController
+
+// NewRuntimeAPIControllerFunc is the released signature of
+// [NewRuntimeAPIController].
+type NewRuntimeAPIControllerFunc = func(session.Service, memory.Service, agent.Loader, artifact.Service, time.Duration, runner.PluginConfig, bool) *RuntimeAPIController
 
 func TestNewRuntimeAPIController_WithEventsCompactionConfig(t *testing.T) {
 	cfg := &compaction.Config{CompactionInterval: 2}

@@ -88,5 +88,11 @@ type Config struct {
 	//
 	// The sliding window reduces prompt size by a constant factor rather than
 	// bounding it. Only tail retention bounds growth. See [compaction.Config].
+	//
+	// This setting is process-wide. One launcher can serve many applications
+	// through its agent loader, and they all get this config or none of them
+	// do, including the same Summarizer instance and so the same model. If
+	// different applications need different compaction, or must not share a
+	// summarizer, run them separately.
 	EventsCompactionConfig *compaction.Config
 }

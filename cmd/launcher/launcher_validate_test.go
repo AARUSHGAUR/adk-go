@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/cmd/launcher/full"
 	"google.golang.org/adk/v2/session/compaction"
 )
 
@@ -58,5 +59,28 @@ func TestConfigValidateRejectsUnusableCompaction(t *testing.T) {
 				t.Errorf("error %q does not name the field", err)
 			}
 		})
+	}
+}
+
+// TestFullLauncherRefusesUnusableCompaction drives the entry point a program
+// actually reaches, rather than Validate on its own.
+//
+// Only a launcher.Launcher has Execute, and full.NewLauncher and
+// universal.NewLauncher are the only two. console.NewLauncher and
+// web.NewLauncher return a launcher.SubLauncher, whose interface has Run and
+// no Execute, so the Execute methods on those two concrete types cannot be
+// called through the exported API at all: the universal launcher dispatches to
+// Run. That makes this the one place the check has to hold, and the arguments
+// are rejected before any of them are parsed.
+func TestFullLauncherRefusesUnusableCompaction(t *testing.T) {
+	t.Parallel()
+
+	cfg := &launcher.Config{EventsCompactionConfig: &compaction.Config{OverlapSize: 2}}
+	err := full.NewLauncher().Execute(t.Context(), cfg, []string{"console"})
+	if err == nil {
+		t.Fatal("Execute() started on a compaction config that cannot work")
+	}
+	if !strings.Contains(err.Error(), "EventsCompactionConfig") {
+		t.Errorf("error %q does not name the field an operator has to change", err)
 	}
 }

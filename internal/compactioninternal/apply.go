@@ -437,6 +437,9 @@ type sessionUnwrapper interface {
 	Unwrap() session.Session
 }
 
+// maxUnwrapDepth caps how far [UnwrapSession] will follow a chain of decorators.
+const maxUnwrapDepth = 32
+
 // UnwrapSession returns the innermost session s decorates, or s itself.
 //
 // An agent may wrap the session it hands to a sub-agent so the sub-agent's
@@ -450,7 +453,12 @@ type sessionUnwrapper interface {
 // visible through the wrapper immediately. A freshly read session would be a
 // different object, and the summary would not reach the prompt being assembled.
 func UnwrapSession(s session.Session) session.Session {
-	for {
+	// The depth limit is not a real bound on nesting, which is one or two in
+	// practice. It is there because Unwrap is reachable by any session with the
+	// right method, including one outside this repository, and a wrapper that
+	// returns itself would otherwise spin here for ever. Giving up returns the
+	// last session seen, which is a session the caller can still use.
+	for range maxUnwrapDepth {
 		w, ok := s.(sessionUnwrapper)
 		if !ok {
 			return s
@@ -461,6 +469,7 @@ func UnwrapSession(s session.Session) session.Session {
 		}
 		s = inner
 	}
+	return s
 }
 
 // inRange reports whether rng covers ev.

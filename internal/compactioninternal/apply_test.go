@@ -16,6 +16,7 @@ package compactioninternal
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 
@@ -536,5 +537,34 @@ func TestApplyKeepsAnEventTiedToTheWindowHead(t *testing.T) {
 	got := ids(Apply(events))
 	if diff := cmp.Diff([]string{"x", "a", "s1"}, got); diff != "" {
 		t.Errorf("prompt events mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// selfWrappingSession returns itself from Unwrap, the shape a third-party
+// session decorator can take by accident.
+type selfWrappingSession struct{ staticSession }
+
+func (s *selfWrappingSession) Unwrap() session.Session { return s }
+
+// TestUnwrapSessionStopsOnACycle pins that unwrapping terminates.
+//
+// Unwrap is matched structurally, so any session with the method satisfies it,
+// including one written outside this repository. A decorator that returns
+// itself would spin the unwrap loop for ever and hang the invocation rather
+// than fail it, so the loop gives up instead.
+func TestUnwrapSessionStopsOnACycle(t *testing.T) {
+	t.Parallel()
+
+	s := &selfWrappingSession{}
+	done := make(chan session.Session, 1)
+	go func() { done <- UnwrapSession(s) }()
+
+	select {
+	case got := <-done:
+		if got != session.Session(s) {
+			t.Errorf("UnwrapSession returned %T, want the session it gave up on", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("UnwrapSession did not return: the unwrap loop has no cycle guard")
 	}
 }

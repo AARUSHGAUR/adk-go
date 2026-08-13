@@ -40,8 +40,12 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPaylo
 	// Validated here rather than left to the first request. A compaction config
 	// is rejected inside runner.New, which the request handlers call, so an
 	// invalid one would otherwise start cleanly and then fail every request.
-	if err := config.EventsCompactionConfig.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid EventsCompactionConfig: %w", err)
+	//
+	// Ask the config to check itself rather than reaching for the one field
+	// that needs checking today, so a check added to Config.Validate later
+	// reaches this surface too instead of being one this copy quietly misses.
+	if err := config.Validate(); err != nil {
+		return nil, err
 	}
 
 	router := mux.NewRouter().StrictSlash(true)
