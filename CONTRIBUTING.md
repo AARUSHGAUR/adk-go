@@ -47,19 +47,19 @@ git switch -c my-fix origin/v1
 
 ### Backporting to `v1`
 
-Every PR into `main` carries one of three labels. They tell reviewers at a
-glance which line a change affects, and they drive the backport queue:
+Three labels are in play, and only one of them does anything:
 
-| Label     | Meaning                                                      |
-| --------- | ------------------------------------------------------------ |
-| `v2-only` | Targets `main`; does not need to reach 1.x.                  |
-| `v2`      | Targets `main`; needs an equivalent change on `v1`.          |
-| `v1`      | Targets the `v1` branch, including backport PRs themselves.  |
+| Label       | Meaning                                                        |
+| ----------- | -------------------------------------------------------------- |
+| `v1-needed` | This change still owes a 1.x equivalent. **Drives the queue.**  |
+| `v2`        | Informational: the PR targets `main`.                           |
+| `v1`        | Informational: the PR targets the `v1` branch.                  |
 
-Label the PR while the context is fresh — at review time, not later. The label
-is what drives the automation, so an unlabelled fix is one nobody backports.
+Add `v1-needed` while the context is fresh — at review time, not later. It is
+the only signal the automation reads, so a fix that should reach 1.x without it
+is a fix nobody backports.
 
-Merging a `v2`-labelled PR opens the backport PR by itself: the
+Merging a `v1-needed` PR opens the backport PR by itself: the
 [`Backport to v1`](.github/workflows/backport.yml) workflow replays the squash
 commit onto `v1` and opens the PR against it. It works off the label queue
 rather than the merge event, so a PR labelled *after* it merged is picked up by

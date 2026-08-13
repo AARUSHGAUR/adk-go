@@ -16,9 +16,9 @@
 #
 # Backport merged `main` pull requests onto the `v1` maintenance branch.
 #
-# Workflow: a PR into `main` is labelled `v2` when it also needs to ship to
-# 1.x (`v2-only` means it does not). This script drains that queue: it replays
-# each merged PR's squash commit onto `v1` and opens a single backport PR.
+# Workflow: a PR into `main` is labelled `v1-needed` when it also has to ship to
+# 1.x. This script drains that queue: it replays each merged PR's squash commit
+# onto `v1` and opens a single backport PR.
 #
 # The one systematic obstacle is the module path: `main` is
 # `google.golang.org/adk/v2`, `v1` is `google.golang.org/adk`, so every Go
@@ -37,11 +37,12 @@ readonly V1_BRANCH="v1"
 readonly V2_MODULE="google.golang.org/adk/v2"
 readonly V1_MODULE="google.golang.org/adk"
 
-# Labels. `v2` marks a merged main PR as needing a 1.x equivalent and is what
-# the queue reads; `v1` marks a PR that targets the maintenance branch and goes
-# on the ones this script opens. Named separately from the branches above,
-# which they only coincidentally match.
-readonly V2_LABEL="v2"
+# Labels. `v1-needed` is the only one with behaviour attached: it marks a merged
+# main PR as still owing a 1.x equivalent, and is what the queue filters on. `v1`
+# and `v2` are informational, saying which branch a PR targets, and `v1` goes on
+# the backport PRs this opens. Named separately from the branch constants above,
+# which `v1` only coincidentally matches.
+readonly BACKPORT_LABEL="v1-needed"
 readonly V1_LABEL="v1"
 
 # How long to wait for CI to register on a new PR before reporting it missing.
@@ -69,8 +70,8 @@ Usage:
   scripts/backport.sh --all --pr             ... and push + open the v1 PR.
 
 Options:
-  -l, --list          List merged `main` PRs labelled `v2` that are not on `v1`
-                      yet, then exit.
+  -l, --list          List merged `main` PRs labelled `v1-needed` that are not
+                      on `v1` yet, then exit.
   -a, --all           Backport every PR in the pending queue, oldest first.
   -p, --pr            Push the branch and open the backport PR. Without this
                       the commits are just left in a local worktree for review.
@@ -222,7 +223,7 @@ pending_queue() {
   backported_prs "${remote}" | sort -u >"${done_file}"
 
   gh pr list --repo "${REPO}" --base "${MAIN_BRANCH}" --state merged \
-    --label "${V2_LABEL}" --limit 200 \
+    --label "${BACKPORT_LABEL}" --limit 200 \
     --json number,title,mergedAt \
     --jq 'sort_by(.mergedAt)[] | "\(.number)\t\(.title)"' |
     while IFS=$'\t' read -r number title; do
@@ -334,7 +335,7 @@ clone cannot be used, check out with fetch-depth: 0"
     local queue
     queue="$(pending_queue "${remote}")"
     if [[ -z "${queue}" ]]; then
-      info "nothing pending: no merged '${MAIN_BRANCH}' PR labelled '${V2_LABEL}' is missing from '${V1_BRANCH}'"
+      info "nothing pending: no merged '${MAIN_BRANCH}' PR labelled '${BACKPORT_LABEL}' is missing from '${V1_BRANCH}'"
       return 0
     fi
     info "pending backports (oldest merge first):"

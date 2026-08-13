@@ -1,8 +1,9 @@
-# Opens the v1 backport PR for merged `main` pull requests labelled `v2`.
+# Opens the v1 backport PR for merged `main` pull requests labelled `v1-needed`.
 #
-# The three labels on a `main` PR mean: `v2-only` (stays on 2.x), `v2` (needs a
-# 1.x equivalent), `v1` (already targets the maintenance branch). This workflow
-# acts on `v2`, and is the automation around scripts/backport.sh.
+# `v1-needed` is the only label with behaviour attached to it: it says a change
+# on main still owes a 1.x equivalent. `v1` and `v2` are informational, recording
+# which branch a PR targets. This workflow acts on `v1-needed`, and is the
+# automation around scripts/backport.sh.
 #
 # The script replays each merged PR's squash commit onto `v1`, rewriting the
 # module path (google.golang.org/adk/v2 -> google.golang.org/adk) so the patch
