@@ -912,3 +912,44 @@ func TestTailRetentionDoesNotRecordADiscardedSummary(t *testing.T) {
 		})
 	}
 }
+
+// TestSkipBlockedHeadStillCompactsPastAnAnsweredSibling pins the positive half
+// of TestSkipBlockedHeadKeepsACallWithItsResponse, which only asserts that a
+// response is not summarized and is therefore satisfied by giving up entirely.
+//
+// One model turn emitting two calls, one to an ordinary tool and one to a
+// long-running tool that never produces a response, is the standard
+// long-running shape. The answered sibling's response necessarily sits after
+// both calls, so every resume point the scan was willing to consider had that
+// response in the tail and a call for it still open in the head, and all of
+// them were refused. Nothing after the blockage was ever compacted again, for
+// the rest of the session, and because "no window" and "nothing to do yet" are
+// both nil it was silent.
+//
+// The resume point that works is the one just after the response: the head then
+// holds the call and its answer, only the long-running call is still open, and
+// the tail answers nothing. The scan skipped it because it only resumed after
+// an event that opened an obligation.
+func TestSkipBlockedHeadStillCompactsPastAnAnsweredSibling(t *testing.T) {
+	t.Parallel()
+
+	window := []*session.Event{
+		multiCallEvent("head", "inv1", 1, "c-longrunning", "c-two"),
+		responseEvent("resp2", "inv1", 2, "c-two"),
+		textEvent("q", "inv2", 3, "later question"),
+		modelTextEvent("a", "inv2", 4, "later answer"),
+		textEvent("q2", "inv3", 5, "later question 2"),
+		modelTextEvent("a2", "inv3", 6, "later answer 2"),
+	}
+
+	got := ids(skipBlockedHead(window))
+	if len(got) == 0 {
+		t.Fatal("skipBlockedHead() = nil: one unanswered call in a parallel pair stalls compaction for the rest of the session")
+	}
+	if slices.Contains(got, "resp2") {
+		t.Errorf("window %v summarizes a response whose call stays raw in the skipped head", got)
+	}
+	if diff := cmp.Diff([]string{"q", "a", "q2", "a2"}, got); diff != "" {
+		t.Errorf("window mismatch (-want +got):\n%s", diff)
+	}
+}

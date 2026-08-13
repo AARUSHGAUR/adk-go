@@ -373,10 +373,22 @@ func trimToOneScope(window []*session.Event) []*session.Event {
 // either.
 func skipBlockedHead(window []*session.Event) []*session.Event {
 	for start := 1; start < len(window); start++ {
-		// Only resume just after an event that opened an obligation, so the
-		// scan is over blockage points rather than every offset.
+		// Resume just after an event that changed the set of open obligations,
+		// so the scan is over boundaries that matter rather than every offset.
+		//
+		// A response counts, not only a call. One model turn emitting a call to
+		// an ordinary tool alongside one to a long-running tool is the standard
+		// long-running shape, and the resume point that works there is the one
+		// just after the ordinary tool's response: the head then holds that call
+		// and its answer, only the long-running call is still open, and the tail
+		// answers nothing. Resuming only after an event that opened an
+		// obligation could never reach it, so every candidate had the response
+		// in the tail with its call open in the head, all of them were refused,
+		// and nothing after the blockage was compacted again.
 		prev := window[start-1]
-		if len(utils.FunctionCalls(utils.Content(prev))) == 0 && len(prev.Actions.RequestedToolConfirmations) == 0 {
+		if len(utils.FunctionCalls(utils.Content(prev))) == 0 &&
+			len(utils.FunctionResponses(utils.Content(prev))) == 0 &&
+			len(prev.Actions.RequestedToolConfirmations) == 0 {
 			continue
 		}
 		tail := longestSelfContainedPrefix(window[start:])
