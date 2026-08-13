@@ -81,8 +81,10 @@ func main() {
 	}
 
 	// The empty config resolves the backend from the environment: a Gemini API
-	// key, or Vertex AI when GOOGLE_GENAI_USE_VERTEXAI is "1" or "true".
-	m, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{})
+	// key, or Vertex AI when GOOGLE_GENAI_USE_VERTEXAI is "1" or "true". Both
+	// have to work here, hence a versioned model: Vertex AI does not serve the
+	// "-latest" aliases.
+	m, err := gemini.NewModel(ctx, "gemini-3.5-flash", &genai.ClientConfig{})
 	if err != nil {
 		log.Fatalf("Failed to create the model: %v", err)
 	}

@@ -86,7 +86,7 @@ func main() {
 			return entry{
 				displayName: e.DisplayName,
 				resource:    e.Name,
-				detail:      endpointURL(e),
+				detail:      summary("urls", endpointURLs(e)),
 			}
 		}); err != nil {
 		log.Fatalf("Failed to list endpoints: %s", explain(err))
@@ -143,13 +143,14 @@ func toolNames(tools []agentregistry.Tool) []string {
 	return names
 }
 
-func endpointURL(e *agentregistry.Endpoint) string {
+func endpointURLs(e *agentregistry.Endpoint) []string {
+	urls := make([]string, 0, len(e.Interfaces))
 	for _, i := range e.Interfaces {
 		if i.URL != "" {
-			return "url: " + i.URL
+			urls = append(urls, i.URL)
 		}
 	}
-	return ""
+	return urls
 }
 
 // explain renders a registry failure as something a human can act on. The

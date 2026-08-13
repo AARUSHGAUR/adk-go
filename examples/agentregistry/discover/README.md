@@ -21,7 +21,7 @@ graph LR
     Client["agentregistry.Client"]
     Client -- "AllAgents(ctx, opts...)" --> A["A2A agents<br/>+ skills"]
     Client -- "AllMCPServers(ctx, opts...)" --> M["MCP servers<br/>+ declared tools"]
-    Client -- "AllEndpoints(ctx, opts...)" --> E["Model endpoints<br/>+ URL"]
+    Client -- "AllEndpoints(ctx, opts...)" --> E["Model endpoints<br/>+ URLs"]
     A --> Out[stdout]
     M --> Out
     E --> Out

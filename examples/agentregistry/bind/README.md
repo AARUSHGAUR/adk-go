@@ -48,7 +48,7 @@ sequenceDiagram
 2. Take the first, logging any others so a surprising pick is visible.
 3. `MCPToolset` the winner, hand it to `llmagent.New`, serve through the launcher. That resolves the endpoint; the MCP session opens on the first model turn.
 
-The live tool set comes from the MCP server itself once connected — the catalog metadata is only used to *choose*.
+The live tool set comes from the MCP server itself once connected — the catalog metadata can lag behind it, and is only used to *choose*.
 
 ## Running the sample
 
@@ -81,7 +81,7 @@ No resource names to paste: the default capability is `list_log_names`, which an
 
 ## Example session
 
-Real output. The default capability resolves to one provider, and the tools it brings are then callable:
+Real output from a project with the Cloud Logging API enabled, abridged in the middle. The default capability resolves to one provider, and the tools it brings are then callable. Your logs will differ; which tools answered is the part that does not:
 
 ```text
 $ go run ./examples/agentregistry/bind/ console
@@ -89,9 +89,9 @@ Tool "list_log_names" is provided by "logging.googleapis.com" (projects/my-proje
 
 User -> In project my-project: list the kinds of logs and the log buckets, one line each, no extra detail. Say which tools you used.
 Agent -> Kinds of logs:
-         projects/my-project/logs/abuseevent.googleapis.com%2Fabuse_events
          projects/my-project/logs/cloudaudit.googleapis.com%2Factivity
          projects/my-project/logs/cloudaudit.googleapis.com%2Fdata_access
+         ...
          Log buckets:
          projects/my-project/locations/global/buckets/_Default
          projects/my-project/locations/global/buckets/_Required
@@ -124,7 +124,6 @@ At no point does the sample contain an endpoint URL, a tool schema, or a token.
 
 ## Notes
 
-- **Declared tools are metadata, not a contract.** `MCPServer.Tools` is what was uploaded with the server spec, so it can lag the server. It is the right input for *choosing* a server and the wrong one for *calling* it — the agent only ever calls what the live MCP connection reports.
 - **The scan reads the whole catalog.** `AllMCPServers` pages on demand, and the sample drains it so it can report every provider rather than the first one it trips over. Narrow it with `WithFilter` if your catalog is large enough for that to matter.
 - **Don't set `http.Client.Timeout` on an egress client.** It is a deadline over the whole request and would truncate a streaming response; bound the `Transport` instead.
 - **Resolution happens once, at startup.** A provider that changes in the registry is picked up on the next run, not mid-session.
