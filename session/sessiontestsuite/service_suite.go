@@ -468,8 +468,14 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 				t.Fatalf("Setup: Create failed: %v", err)
 			}
 
-			start := time.Now().UTC().Truncate(time.Millisecond)
-			end := start.Add(5 * time.Second)
+			// Nanosecond precision on purpose. A millisecond-truncated fixture
+			// cannot tell a backend that keeps the record faithfully from one
+			// that rounds it, and rounding here is not cosmetic: a reference
+			// that stops matching its event is read as no hole at all, so a
+			// summary that never saw that event covers it and it is dropped
+			// from every later prompt.
+			start := time.Date(2026, 3, 4, 5, 6, 7, 123456789, time.UTC)
+			end := start.Add(5*time.Second + 987*time.Nanosecond)
 			event := &session.Event{
 				ID:           "compaction_event",
 				Author:       "user",
@@ -522,6 +528,98 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			}
 			if diff := cmp.Diff(want, c.ExcludedEvents); diff != "" {
 				t.Errorf("excluded events mismatch (-want +got):\n%s", diff)
+			}
+		})
+
+		t.Run("a_hole_still_names_its_event_after_a_round_trip", func(t *testing.T) {
+			// The previous case checks the record survives. This checks the
+			// record and the events still agree about which event is which,
+			// which is a separate property and the one that loses conversation
+			// when it fails.
+			//
+			// A hole names an event by invocation and timestamp. The reference
+			// is written from an event the caller read back, and matched later
+			// against that same event read back again. A backend that keeps
+			// event timestamps and record payloads in different precision
+			// domains breaks the match, and a hole that stops matching is read
+			// as no hole at all: the summary covers an event it never saw, and
+			// that turn is gone from every later prompt.
+			//
+			// What this catches is divergence, not rounding. A backend that
+			// rounds the event and every reference derived from it to the same
+			// resolution stays consistent and passes, whatever that resolution
+			// is. A backend that keeps the two in different precision domains,
+			// or that rounds the event on read while the record keeps what the
+			// client wrote, does not.
+			//
+			// Compaction itself compares at microsecond granularity, which is
+			// what the assertion below mirrors.
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+
+			turn := &session.Event{Author: "user", InvocationID: "inv-hole", Timestamp: time.Date(2026, 3, 4, 5, 6, 7, 123456789, time.UTC)}
+			if err := s.AppendEvent(ctx, created.Session, turn); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+
+			// The reference is built from the event as stored, which is what
+			// window selection sees.
+			readBack := func() []*session.Event {
+				t.Helper()
+				got, err := s.Get(ctx, &session.GetRequest{AppName: testAppName, UserID: "user1", SessionID: created.Session.ID()})
+				if err != nil {
+					t.Fatalf("Get() error = %v", err)
+				}
+				return Snapshot(got.Session).Events
+			}
+
+			stored := readBack()
+			if len(stored) != 1 {
+				t.Fatalf("stored %d events, want 1", len(stored))
+			}
+			ref := session.EventRef{InvocationID: stored[0].InvocationID, Timestamp: stored[0].Timestamp}
+
+			record := &session.Event{
+				Author:       "user",
+				InvocationID: "inv-summary",
+				Actions: session.EventActions{
+					Compaction: &session.EventCompaction{
+						StartTimestamp:   ref.Timestamp.Add(-time.Hour),
+						EndTimestamp:     ref.Timestamp.Add(time.Hour),
+						CompactedContent: genai.NewContentFromText("summary", "model"),
+						ExcludedEvents:   []session.EventRef{ref},
+					},
+				},
+			}
+			if err := s.AppendEvent(ctx, created.Session, record); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+
+			after := readBack()
+			var event *session.Event
+			var rng *session.EventCompaction
+			for _, ev := range after {
+				if ev.Actions.Compaction != nil {
+					rng = ev.Actions.Compaction
+					continue
+				}
+				if ev.InvocationID == "inv-hole" {
+					event = ev
+				}
+			}
+			if event == nil || rng == nil || len(rng.ExcludedEvents) != 1 {
+				t.Fatalf("expected the turn and a record naming one hole, got event=%v record=%v", event, rng)
+			}
+			got := rng.ExcludedEvents[0]
+			if got.InvocationID != event.InvocationID ||
+				!got.Timestamp.Truncate(time.Microsecond).Equal(event.Timestamp.Truncate(time.Microsecond)) {
+				t.Errorf("the hole no longer names its event after a round trip:\n  hole  = %s @ %v\n  event = %s @ %v",
+					got.InvocationID, got.Timestamp, event.InvocationID, event.Timestamp)
 			}
 		})
 
