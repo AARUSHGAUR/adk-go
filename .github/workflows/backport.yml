@@ -50,14 +50,35 @@ jobs:
       # trigger workflow runs, so the backport PR would arrive with no CI and
       # could never satisfy the checks needed to merge it. Failing loudly here
       # beats producing an unmergeable PR.
-      - name: Require a backport token
+      # Checked before the checkout, which would otherwise be the first thing to
+      # fail and would report only that the repository could not be read.
+      - name: Require a working backport token
         env:
-          BACKPORT_TOKEN: ${{ secrets.BACKPORT_TOKEN }}
+          GH_TOKEN: ${{ secrets.BACKPORT_TOKEN }}
         run: |
-          if [ -z "${BACKPORT_TOKEN}" ]; then
+          if [ -z "${GH_TOKEN}" ]; then
             echo "::error::BACKPORT_TOKEN is not configured. The built-in GITHUB_TOKEN" \
                  "cannot be used: pull requests it opens do not trigger workflow runs," \
                  "so the backport PR would never get the CI it needs to be merged."
+            exit 1
+          fi
+
+          # A fine-grained PAT scoped to an organization exists, and authenticates,
+          # from the moment it is created -- but cannot see the repository until an
+          # org admin approves the request. That reads as a missing repository
+          # rather than a missing permission, so name the likely cause here.
+          if ! push="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.permissions.push // "unknown"' 2>/dev/null)"; then
+            echo "::error::BACKPORT_TOKEN cannot see ${GITHUB_REPOSITORY}. If it is a" \
+                 "fine-grained personal access token, the organization has probably not" \
+                 "approved it yet; check the pending requests under the org's Personal" \
+                 "access tokens settings. Otherwise check the token's resource owner" \
+                 "and repository scope."
+            exit 1
+          fi
+          if [ "${push}" = "false" ]; then
+            echo "::error::BACKPORT_TOKEN can read ${GITHUB_REPOSITORY} but cannot push" \
+                 "to it. Grant the token Contents: Read and write, and Pull requests:" \
+                 "Read and write."
             exit 1
           fi
 
