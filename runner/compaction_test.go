@@ -1593,3 +1593,100 @@ func TestPluginCannotSmuggleAFunctionCallIntoASummary(t *testing.T) {
 		}
 	}
 }
+
+// TestStragglerInThePluginWindowIsNotLost pins that an event appended while a
+// plugin inspects the summary is not deleted by that summary.
+//
+// The race guard reads the session, then plugins run, then the summary is
+// appended. A plugin is arbitrary code, so the gap between the check and the
+// append was wide enough to append into, and anything landing there sits inside
+// the recorded range while being named by nothing, so prompt assembly drops it.
+//
+// A plugin appending is the reliable way to reach the window, not the only one.
+// An event carries the timestamp it was created at rather than the one it was
+// stored at, so parallel tool responses and sub-agent events funnelled through
+// a channel are routinely created before a range ends and stored after it.
+func TestStragglerInThePluginWindowIsNotLost(t *testing.T) {
+	t.Parallel()
+
+	const userID, sessionID = "u", "s"
+	svc := session.InMemoryService()
+
+	var once sync.Once
+	appender, err := plugin.New(plugin.Config{
+		Name: "appender",
+		OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+			if !compactioninternal.HasUsableSummary(ev) {
+				return nil, nil
+			}
+			once.Do(func() {
+				// Timestamped inside the range the summary just claimed, which
+				// is what an event created before the range ended and stored
+				// after it looks like.
+				sess := getSession(t, svc, userID, sessionID)
+				straggler := session.NewEvent(t.Context(), "straggler-inv")
+				straggler.Author = "user"
+				straggler.Timestamp = ev.Actions.Compaction.EndTimestamp
+				straggler.LLMResponse.Content = genai.NewContentFromText("PLEASE DO NOT LOSE ME", genai.RoleUser)
+				if err := svc.AppendEvent(t.Context(), sess, straggler); err != nil {
+					t.Errorf("AppendEvent() error = %v", err)
+				}
+			})
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+
+	root, err := llmagent.New(llmagent.Config{Name: "assistant", Model: &scriptedModel{replyFmt: "answer %d"}})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	r, err := New(Config{
+		AppName:                "compaction_app",
+		Agent:                  root,
+		SessionService:         svc,
+		AutoCreateSession:      true,
+		PluginConfig:           PluginConfig{Plugins: []*plugin.Plugin{appender}},
+		EventsCompactionConfig: &compaction.Config{CompactionInterval: 1, Summarizer: &recordingSummarizer{summary: "SUMMARY"}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}))
+
+	// The summary must not have been stored: it claims a range the straggler
+	// now sits in, and it never saw the straggler. Being covered by a summary
+	// that does not describe it is the loss, and it is invisible in the prompt
+	// because something plausible stands where the event used to be.
+	var straggler *session.Event
+	stored := sessionEventsOf(t, svc, userID, sessionID)
+	for _, ev := range stored {
+		if ev.InvocationID == "straggler-inv" {
+			straggler = ev
+		}
+	}
+	if straggler == nil {
+		t.Fatal("the straggler was never appended, so this test proves nothing")
+	}
+	for _, ev := range stored {
+		rec := ev.Actions.Compaction
+		if rec == nil {
+			continue
+		}
+		if straggler.Timestamp.Before(rec.StartTimestamp) || straggler.Timestamp.After(rec.EndTimestamp) {
+			continue
+		}
+		excluded := false
+		for _, ref := range rec.ExcludedEvents {
+			if ref.InvocationID == straggler.InvocationID && ref.Timestamp.Equal(straggler.Timestamp) {
+				excluded = true
+			}
+		}
+		if !excluded {
+			t.Errorf("summary %s covers an event appended while a plugin ran, which it never summarized", ev.ID)
+		}
+	}
+}

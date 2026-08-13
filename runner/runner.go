@@ -299,14 +299,37 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 		finish(nil, "the run ended before the summary could be stored")
 		return nil
 	}
-	latest, err := r.reloadSession(ctx, storedSession)
+	// raced re-reads the session and reports whether anything landed inside the
+	// range since the summary was chosen. It runs twice: here, so a doomed
+	// summary does not cost a plugin pass, and again immediately before the
+	// append.
+	//
+	// Once is not enough because a plugin runs in between and that is arbitrary
+	// code. Anything appended while it runs falls inside the recorded range and
+	// is named by nothing, so prompt assembly drops it. This does not need a
+	// hostile plugin or even a concurrent invocation to reach: an event carries
+	// the timestamp it was created at rather than the one it was stored at, so
+	// parallel tool responses and sub-agent events funnelled through a channel
+	// are routinely created before the range ends and appended after it.
+	raced := func() (bool, error) {
+		latest, err := r.reloadSession(ctx, storedSession)
+		if err != nil {
+			return false, err
+		}
+		return compactioninternal.RangeRaced(latest, current, summary), nil
+	}
+	discardRaced := func() {
+		finish(nil, "another compaction covering the same events landed while summarizing")
+		log.Printf("adk: discarding a context compaction summary because the session changed inside its range while summarizing")
+	}
+
+	lost, err := raced()
 	if err != nil {
 		finish(err, "")
 		return fmt.Errorf("%w: post-invocation: %w", compaction.ErrCompaction, err)
 	}
-	if compactioninternal.RangeRaced(latest, current, summary) {
-		finish(nil, "another compaction covering the same events landed while summarizing")
-		log.Printf("adk: discarding a context compaction summary because the session changed inside its range while summarizing")
+	if lost {
+		discardRaced()
 		return nil
 	}
 
@@ -337,6 +360,21 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 			}
 			summary = modified
 		}
+	}
+
+	// The plugin pass above is the widest part of the window, so the check is
+	// repeated now that it has run. What remains between here and the append is
+	// not closed: shutting that too needs the append itself to be conditional
+	// on a session version, which the session.Service interface has no way to
+	// express.
+	lost, err = raced()
+	if err != nil {
+		finish(err, "")
+		return fmt.Errorf("%w: post-invocation: %w", compaction.ErrCompaction, err)
+	}
+	if lost {
+		discardRaced()
+		return nil
 	}
 
 	if err := r.sessionService.AppendEvent(ctx, current, summary); err != nil {
