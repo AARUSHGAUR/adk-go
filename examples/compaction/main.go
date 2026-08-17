@@ -17,10 +17,20 @@
 // Compaction keeps an agent's prompt small as its conversation grows: older
 // turns are summarized into a single event, and later prompts carry that
 // summary instead of the raw turns. Two triggers are available, and this
-// example arms both:
+// example arms the sliding window:
 //
-//   - Sliding window fires after every CompactionInterval completed turns.
-//   - Tail retention fires mid-turn, once a prompt reaches TokenThreshold.
+//   - Sliding window fires after every CompactionInterval completed turns. It
+//     replaces each group of turns with one summary, a constant-factor
+//     reduction. Summaries are never re-summarized, so the prompt still grows
+//     with the length of the conversation.
+//   - Tail retention fires mid-turn once a prompt reaches TokenThreshold, and
+//     keeps one rolling summary plus the most recent events. This is the
+//     trigger that puts a ceiling on prompt size.
+//
+// Arm one or the other, not both. The sliding window summarizes the events tail
+// retention would have worked on, so with both enabled tail retention never
+// finds enough uncovered events to fire and the ceiling never applies. The
+// commented pair below swaps this example over to it.
 //
 // Setting EventsCompactionConfig on [launcher.Config] enables compaction on
 // every surface that reads that config. The launcher used here, full.NewLauncher,
@@ -90,14 +100,20 @@ func main() {
 			CompactionInterval: 2,
 			OverlapSize:        1,
 
-			// Tail retention: if a prompt ever reaches 32k tokens, summarize
-			// everything but the 10 most recent events before the next model
-			// call. This runs *during* a turn, so it also catches a single
-			// long tool-calling turn that inflates the prompt on its own.
+			// Tail retention, commented out on purpose. Enabling it here would
+			// do nothing: the sliding window above summarizes every group of
+			// two turns, so the events this trigger looks at, the ones no
+			// compaction covers yet, never reach EventRetentionSize and it
+			// never fires.
 			//
-			// The two triggers are independent; either alone is a valid setup.
-			TokenThreshold:     32_000,
-			EventRetentionSize: 10,
+			// To try it, delete the two sliding-window settings above and
+			// uncomment these. It runs *during* a turn, so it also catches a
+			// single long tool-calling turn that inflates the prompt on its
+			// own, and it is the trigger that bounds prompt size rather than
+			// just reducing it.
+			//
+			//	TokenThreshold:     32_000,
+			//	EventRetentionSize: 10,
 		},
 	}
 

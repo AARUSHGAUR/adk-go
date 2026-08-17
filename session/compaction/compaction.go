@@ -30,8 +30,30 @@
 //
 // Tail retention is what bounds it: each new summary is seeded with the
 // previous one, so history stays as a single rolling summary plus a raw tail.
-// An agent that needs a genuine ceiling on prompt size should enable it, either
-// on its own or alongside the sliding window.
+// An agent that needs a genuine ceiling on prompt size should enable it.
+//
+// # Enable one strategy, not both
+//
+// The two do not compose, despite firing at different points: tail retention
+// runs mid-invocation before a model call, the sliding window once an
+// invocation has completed.
+//
+// They share a candidate rule. Tail retention summarizes the events that no
+// compaction already covers, and the sliding window covers everything it
+// reaches, every CompactionInterval invocations. What is left uncovered never
+// exceeds EventRetentionSize, so tail retention finds nothing to do and never
+// fires. It cannot fall back to consolidating the summaries either, because
+// those are compaction events and no strategy re-summarizes one.
+//
+// So adding the sliding window to a bounded configuration unbounds it. Measured
+// over 160 turns with a 520-character summary: tail retention alone held the
+// prompt flat at about 550 characters, and the two together grew it linearly to
+// 41,000. adk-python starves its own token-threshold strategy the same way, so
+// this is a property of the shared design rather than of this implementation.
+//
+// Enable tail retention for a ceiling, or the sliding window for a
+// constant-factor reduction. Enabling both gives the sliding window's behaviour
+// at the cost of both.
 //
 // Compaction is enabled per runner. See the EventsCompactionConfig field on
 // runner.Config:
@@ -77,16 +99,23 @@ var ErrCompaction = errors.New("context compaction failed")
 
 // Config configures context compaction for an application.
 //
-// Two independent strategies are available, and at least one must be enabled.
-// A Config that enables neither is rejected by [Config.Validate], because it
-// would cost a configuration step and do nothing; leave the whole Config nil to
-// disable compaction:
+// Two strategies are available, and at least one must be enabled. A Config that
+// enables neither is rejected by [Config.Validate], because it would cost a
+// configuration step and do nothing; leave the whole Config nil to disable
+// compaction:
 //
 //   - Sliding window (CompactionInterval, OverlapSize) runs after an invocation
 //     completes and summarizes whole invocations at a time.
 //   - Tail retention (TokenThreshold, EventRetentionSize) runs inside an
 //     invocation before a model call and summarizes everything but the most
 //     recent events once the prompt grows past a token budget.
+//
+// Choose one. They are not independent: the sliding window consumes the events
+// tail retention would otherwise summarize, so enabling both leaves tail
+// retention permanently idle and the prompt unbounded. See the package
+// documentation for the measurements. Validate accepts the combination, because
+// it is well-formed and because rejecting it would break configurations that
+// already exist, but it is the sliding window alone that you get.
 type Config struct {
 	// CompactionInterval is the number of new user-initiated invocations that,
 	// once fully represented in the session's events, triggers a sliding-window

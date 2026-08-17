@@ -61,7 +61,10 @@ type ControllerOption func(*RetriableRunner)
 // trigger controller creates, replacing older session events with summaries.
 //
 // The sliding window reduces prompt size by a constant factor rather than
-// bounding it. Only tail retention bounds growth. See [compaction.Config].
+// bounding it. Only tail retention bounds growth, and only when the sliding
+// window is off: with both enabled the sliding window consumes the events tail
+// retention would summarize and it never fires. Enable one. See
+// [compaction.Config].
 //
 // Note what a trigger surface is. A delivery gets a session of its own, so
 // history does not accumulate across messages and a sliding window counting

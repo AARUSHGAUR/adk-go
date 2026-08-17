@@ -87,7 +87,10 @@ type Config struct {
 	// the default, disables compaction.
 	//
 	// The sliding window reduces prompt size by a constant factor rather than
-	// bounding it. Only tail retention bounds growth. See [compaction.Config].
+	// bounding it. Only tail retention bounds growth, and only when the sliding
+	// window is off: with both enabled the sliding window consumes the events
+	// tail retention would summarize and it never fires. Enable one. See
+	// [compaction.Config].
 	//
 	// This setting is process-wide. One launcher can serve many applications
 	// through its agent loader, and they all get this config or none of them
