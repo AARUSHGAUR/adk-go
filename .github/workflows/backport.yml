@@ -17,6 +17,20 @@
 # ever fires for something already merged. The work is driven off the label
 # queue rather than the event payload, so nothing here depends on which event
 # woke it up.
+#
+# The built-in GITHUB_TOKEN is enough. Since June 2026 a pull request opened by
+# github-actions[bot] does trigger its `pull_request` workflows, in an
+# approval-required state: the runs are created but held until someone with
+# write access clicks "Approve workflows to run" on the backport PR.
+# https://github.blog/changelog/2026-06-11-bot-created-pull-requests-can-run-workflows-if-approved/
+# That is one extra click on a pull request a human has to review and merge
+# anyway, and it costs the repository no long-lived credential: this token is
+# scoped to this repository, expires with the job, and belongs to no account.
+#
+# It does need "Allow GitHub Actions to create and approve pull requests"
+# (Settings -> Actions -> General, inherited from the organization). That is not
+# readable from a workflow, so it is not checked up front; `gh pr create` fails
+# on it and the handler at the bottom of the job names it.
 name: Backport to v1
 
 on:
@@ -34,8 +48,11 @@ on:
         required: true
         default: all
 
+# contents: to push the backport branch. pull-requests: to open the backport PR,
+# label it, and comment on the original when a replay fails.
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
 
 # Serialize: two pushes in quick succession must not race on the same v1 base.
 concurrency:
@@ -46,63 +63,26 @@ jobs:
   backport:
     runs-on: ubuntu-latest
     steps:
-      # BACKPORT_TOKEN must be a PAT or GitHub App installation token, not the
-      # built-in GITHUB_TOKEN. Pull requests opened with GITHUB_TOKEN do not
-      # trigger workflow runs, so the backport PR would arrive with no CI and
-      # could never satisfy the checks needed to merge it. Failing loudly here
-      # beats producing an unmergeable PR.
-      # Checked before the checkout, which would otherwise be the first thing to
-      # fail and would report only that the repository could not be read.
-      - name: Require a working backport token
-        env:
-          GH_TOKEN: ${{ secrets.BACKPORT_TOKEN }}
-        run: |
-          if [ -z "${GH_TOKEN}" ]; then
-            echo "::error::BACKPORT_TOKEN is not configured. The built-in GITHUB_TOKEN" \
-                 "cannot be used: pull requests it opens do not trigger workflow runs," \
-                 "so the backport PR would never get the CI it needs to be merged."
-            exit 1
-          fi
-
-          # A fine-grained PAT scoped to an organization exists, and authenticates,
-          # from the moment it is created -- but cannot see the repository until an
-          # org admin approves the request. That reads as a missing repository
-          # rather than a missing permission, so name the likely cause here.
-          if ! push="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.permissions.push // "unknown"' 2>/dev/null)"; then
-            echo "::error::BACKPORT_TOKEN cannot see ${GITHUB_REPOSITORY}. If it is a" \
-                 "fine-grained personal access token, the organization has probably not" \
-                 "approved it yet; check the pending requests under the org's Personal" \
-                 "access tokens settings. Otherwise check the token's resource owner" \
-                 "and repository scope."
-            exit 1
-          fi
-          if [ "${push}" = "false" ]; then
-            echo "::error::BACKPORT_TOKEN can read ${GITHUB_REPOSITORY} but cannot push" \
-                 "to it. Grant the token Contents: Read and write, and Pull requests:" \
-                 "Read and write."
-            exit 1
-          fi
-
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           # The full history: the replay needs the merge base of main and v1.
           fetch-depth: 0
-          token: ${{ secrets.BACKPORT_TOKEN }}
           # Kept, rather than the usual false, because the script pushes the
           # backport branch. No untrusted code is checked out here.
           persist-credentials: true
 
+      # The bot, not the merging human: it is the bot that pushes this branch
+      # and opens the pull request, and the replayed commits keep their original
+      # authors regardless.
       - name: Configure git identity
-        env:
-          ACTOR_ID: ${{ github.actor_id }}
         run: |
-          git config user.name "${GITHUB_ACTOR}"
-          git config user.email "${ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Backport
         id: backport
         env:
-          GH_TOKEN: ${{ secrets.BACKPORT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Passed through the environment rather than interpolated into the
           # script body, so the value stays data instead of becoming shell.
           EVENT: ${{ github.event_name }}
@@ -123,10 +103,22 @@ jobs:
       - name: Ask for a manual backport when the replay fails
         if: failure() && steps.backport.outcome == 'failure'
         env:
-          GH_TOKEN: ${{ secrets.BACKPORT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -uo pipefail
+          # The one failure that is a repository setting rather than a conflict.
+          # It cannot be detected before the fact -- a workflow token cannot read
+          # the setting -- so it is recognised here, from what the API said.
+          if grep -q 'not permitted to create or approve pull requests' /tmp/backport.log; then
+            echo "::error::This repository does not allow GitHub Actions to create pull" \
+                 "requests, so the backport branch was pushed but no PR was opened. Enable" \
+                 "Settings -> Actions -> General -> 'Allow GitHub Actions to create and" \
+                 "approve pull requests' (it may be inherited from the organization), then" \
+                 "re-run. The pushed branch is reused, not duplicated."
+            exit 1
+          fi
+
           # The script names the PR it stopped on; without one there is nowhere
           # meaningful to comment, so leave the failed run to speak for itself.
           pr="$(grep -oE 'PR #[0-9]+ does not apply cleanly' /tmp/backport.log |

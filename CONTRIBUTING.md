@@ -89,12 +89,17 @@ A queued PR drops off the list once its number is referenced by a commit on
 several fixes into one backport PR stays cheap.
 
 Backport PRs get the usual CI, because the `pull_request` triggers in `go.yml`
-and `apidiff.yml` filter on the base branch and list `v1`. That relies on a
-`BACKPORT_TOKEN` repository secret holding a PAT or GitHub App token: pull
-requests opened with the built-in `GITHUB_TOKEN` do not trigger workflow runs,
-so the backport PR would arrive with no CI and could never be merged. The
-workflow refuses to start without that secret, and the script confirms the runs
-actually registered before it exits.
+and `apidiff.yml` filter on the base branch and list `v1` — but **the runs start
+held**. A pull request opened by `github-actions[bot]` gets its workflows in an
+approval-required state, so open the backport PR and click **Approve workflows
+to run** in the merge box; anyone with write access can. The script says so if
+nothing has registered by the time it exits.
+
+That is what running on the built-in `GITHUB_TOKEN` costs, and it is worth
+paying: no long-lived credential lives in the repository, and the click lands on
+a pull request someone has to review anyway. The one repository setting it needs
+is "Allow GitHub Actions to create and approve pull requests", under
+Settings → Actions → General.
 
 Authorship works out the same way it does today. Each replayed commit keeps
 its original author locally, but squash-merging the backport PR makes the PR
