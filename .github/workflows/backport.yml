@@ -5,11 +5,12 @@
 # which branch a PR targets. This workflow acts on `v1-needed`, and is the
 # automation around scripts/backport.sh.
 #
-# The script replays each merged PR's squash commit onto `v1`, rewriting the
-# module path (google.golang.org/adk/v2 -> google.golang.org/adk) so the patch
-# matches the 1.x import blocks, and opens the PR. Conflicts are not guessed
-# at: the run fails and comments on the original PR asking for a manual
-# backport.
+# The script replays each merged PR's squash commit onto its own branch cut from
+# `v1`, rewriting the module path (google.golang.org/adk/v2 ->
+# google.golang.org/adk) so the patch matches the 1.x import blocks, and opens
+# one pull request per backport. Conflicts are not guessed at: that PR is left
+# alone and the script comments on the original asking for a manual backport.
+# One conflict costs one backport, not the run.
 #
 # Triggering on push rather than pull_request_target is deliberate. This job
 # holds a token that can push and open pull requests, and pull_request_target
@@ -29,8 +30,8 @@
 #
 # It does need "Allow GitHub Actions to create and approve pull requests"
 # (Settings -> Actions -> General, inherited from the organization). That is not
-# readable from a workflow, so it is not checked up front; `gh pr create` fails
-# on it and the handler at the bottom of the job names it.
+# readable from a workflow, so it is not checked up front; the script recognises
+# the failure and says so.
 name: Backport to v1
 
 on:
@@ -48,8 +49,8 @@ on:
         required: true
         default: all
 
-# contents: to push the backport branch. pull-requests: to open the backport PR,
-# label it, and comment on the original when a replay fails.
+# contents: to push the backport branches. pull-requests: to open them, label
+# them, and comment on an original whose replay conflicted.
 permissions:
   contents: write
   pull-requests: write
@@ -68,79 +69,35 @@ jobs:
           # The full history: the replay needs the merge base of main and v1.
           fetch-depth: 0
           # Kept, rather than the usual false, because the script pushes the
-          # backport branch. No untrusted code is checked out here.
+          # backport branches. No untrusted code is checked out here.
           persist-credentials: true
 
-      # The bot, not the merging human: it is the bot that pushes this branch
-      # and opens the pull request, and the replayed commits keep their original
-      # authors regardless.
+      # The bot, not the merging human: it is the bot that pushes these branches
+      # and opens the pull requests, and each replayed commit keeps its original
+      # author regardless.
       - name: Configure git identity
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Backport
-        id: backport
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Passed through the environment rather than interpolated into the
           # script body, so the value stays data instead of becoming shell.
-          EVENT: ${{ github.event_name }}
           PRS: ${{ inputs.prs }}
         run: |
           set -euo pipefail
-          args=(--all)
-          if [ "${EVENT}" = "workflow_dispatch" ] && [ "${PRS}" != "all" ]; then
+          args=()
+          if [ -n "${PRS:-}" ] && [ "${PRS}" != "all" ]; then
+            # Validated rather than trusted: the split below turns whatever this
+            # holds into separate arguments, and an option among them would be
+            # read as one.
+            if ! printf '%s' "${PRS}" | grep -qE '^[0-9]+([[:space:]]+[0-9]+)*$'; then
+              echo "::error::prs must be PR numbers separated by spaces, or 'all'"
+              exit 1
+            fi
             # shellcheck disable=SC2206  # Deliberate split into separate args.
             args=(${PRS})
           fi
-          set +e
-          scripts/backport.sh "${args[@]}" --pr 2>&1 | tee /tmp/backport.log
-          status=${PIPESTATUS[0]}
-          set -e
-          exit "${status}"
-
-      - name: Ask for a manual backport when the replay fails
-        if: failure() && steps.backport.outcome == 'failure'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -uo pipefail
-          # The one failure that is a repository setting rather than a conflict.
-          # It cannot be detected before the fact -- a workflow token cannot read
-          # the setting -- so it is recognised here, from what the API said.
-          if grep -q 'not permitted to create or approve pull requests' /tmp/backport.log; then
-            echo "::error::This repository does not allow GitHub Actions to create pull" \
-                 "requests, so the backport branch was pushed but no PR was opened. Enable" \
-                 "Settings -> Actions -> General -> 'Allow GitHub Actions to create and" \
-                 "approve pull requests' (it may be inherited from the organization), then" \
-                 "re-run. The pushed branch is reused, not duplicated."
-            exit 1
-          fi
-
-          # The script names the PR it stopped on; without one there is nowhere
-          # meaningful to comment, so leave the failed run to speak for itself.
-          pr="$(grep -oE 'PR #[0-9]+ does not apply cleanly' /tmp/backport.log |
-                grep -oE '[0-9]+' | head -1 || true)"
-          if [ -z "${pr}" ]; then
-            echo "::warning::backport failed before it reached a specific PR; not commenting"
-            exit 0
-          fi
-          {
-            echo "Automatic backport to \`v1\` failed: the change does not replay cleanly,"
-            echo "which usually means 1.x lacks something 2.x already had."
-            echo
-            echo "To finish it by hand:"
-            echo
-            echo '```bash'
-            echo "scripts/backport.sh ${pr}"
-            echo '```'
-            echo
-            echo "That leaves the conflicts in a scratch worktree with \`.rej\` files and"
-            echo "prints the commands to complete the commit. Re-run with \`--pr\` to open"
-            echo "the PR once it builds."
-            echo
-            echo "[Failed run](${RUN_URL})"
-          } > /tmp/backport-comment.md
-          gh pr comment "${pr}" --body-file /tmp/backport-comment.md
+          scripts/backport.sh "${args[@]}" --pr

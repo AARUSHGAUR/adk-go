@@ -59,41 +59,42 @@ Add `v1-needed` while the context is fresh — at review time, not later. It is
 the only signal the automation reads, so a fix that should reach 1.x without it
 is a fix nobody backports.
 
-Merging a `v1-needed` PR opens the backport PR by itself: the
+Merging a `v1-needed` PR opens its backport by itself: the
 [`Backport to v1`](.github/workflows/backport.yml) workflow replays the squash
-commit onto `v1` and opens the PR against it. It works off the label queue
-rather than the merge event, so a PR labelled *after* it merged is picked up by
-the nightly run, and re-running on one that is already backported is a no-op
-rather than an error.
+commit onto a branch cut from `v1` and opens a pull request against it. **One
+backport PR per original PR** — a change that conflicts costs its own backport
+and nothing else. The workflow works off the label queue rather than the merge
+event, so a PR labelled *after* it merged is picked up by the nightly run, and
+re-running on one that is already backported is a no-op rather than an error.
 
 The workflow runs `scripts/backport.sh`, which is also usable directly — to
-check the queue, to drain a backlog, or to work through a conflict the
-automation could not:
+check the queue, or to work through a conflict the automation could not:
 
 ```bash
 scripts/backport.sh --list         # what is pending?
 scripts/backport.sh 1301           # replay one PR onto a local branch
-scripts/backport.sh --all --pr     # drain the queue, push, open the v1 PR
+scripts/backport.sh --pr           # replay the whole queue and open the PRs
 ```
 
 It replays each commit in a scratch worktree, so your current checkout is never
-touched.
+touched, and nothing leaves the machine without `--pr`.
 
 The script rewrites the module path (`google.golang.org/adk/v2` →
 `google.golang.org/adk`) in each patch before applying it. That difference is
 otherwise the main source of cherry-pick conflicts, because it puts every Go
 file's import block out of sync between the two branches.
 
-A queued PR drops off the list once its number is referenced by a commit on
-`v1` or by an open PR targeting `v1`, so the queue clears itself and batching
-several fixes into one backport PR stays cheap.
+A PR leaves the queue when its change reaches `v1` — matched on the
+`(cherry picked from commit <sha>)` trailer the script writes, not on anything
+parsed out of a title — or while its `backport/v1/pr-<n>` branch exists. Delete
+that branch and the PR is queued again, which is how you regenerate a backport
+that went stale.
 
 Backport PRs get the usual CI, because the `pull_request` triggers in `go.yml`
 and `apidiff.yml` filter on the base branch and list `v1` — but **the runs start
 held**. A pull request opened by `github-actions[bot]` gets its workflows in an
 approval-required state, so open the backport PR and click **Approve workflows
-to run** in the merge box; anyone with write access can. The script says so if
-nothing has registered by the time it exits.
+to run** in the merge box; anyone with write access can.
 
 That is what running on the built-in `GITHUB_TOKEN` costs, and it is worth
 paying: no long-lived credential lives in the repository, and the click lands on
@@ -110,16 +111,15 @@ Two things the tooling cannot do for you:
 
 -   **A clean apply is not a correct backport.** `v1` may lack a helper or a
     refactor that `main` already had, so a patch can apply and still not
-    compile. Run the full build and test suite in the worktree — the script
-    prints the exact commands — before opening the PR.
+    compile. Build and test the backport branch before merging it.
 -   **Dependency changes need judgement.** The 1.x dependency set differs from
     main's, so `go.mod` hunks often reject. Re-run with `--skip-gomod` and
     `go mod tidy` the module instead.
 
-When a patch conflicts, the script applies what it can, leaves `.rej` files
-behind, and prints the commands needed to finish the commit by hand. Reaching
-that point from the workflow does not fail silently: the run comments on the
-original PR asking for a manual backport.
+When a patch conflicts, a local run applies what it can and leaves `.rej` files
+in the worktree to work from. The unattended run does not push a half-applied
+tree: it comments on the original PR asking for a manual backport, once, and
+leaves the PR queued so a later `v1` change can still let it land on its own.
 
 ## Multi-Module Development
 
