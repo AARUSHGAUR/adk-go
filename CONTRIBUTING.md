@@ -72,12 +72,14 @@ check the queue, or to work through a conflict the automation could not:
 
 ```bash
 scripts/backport.sh --list         # what is pending?
-scripts/backport.sh 1301           # replay one PR onto a local branch
+scripts/backport.sh 1301           # replay one PR into a scratch worktree
 scripts/backport.sh --pr           # replay the whole queue and open the PRs
 ```
 
-It replays each commit in a scratch worktree, so your current checkout is never
-touched, and nothing leaves the machine without `--pr`.
+It replays each commit on a detached HEAD in a scratch worktree under `$TMPDIR`,
+so your working tree and your branches are left alone — it does add and remove
+its own worktree in your clone, and prunes stale worktree registrations while
+doing so. Nothing leaves the machine without `--pr`.
 
 The script rewrites the module path (`google.golang.org/adk/v2` →
 `google.golang.org/adk`) in each patch before applying it. That difference is
@@ -102,10 +104,12 @@ a pull request someone has to review anyway. The one repository setting it needs
 is "Allow GitHub Actions to create and approve pull requests", under
 Settings → Actions → General.
 
-Authorship works out the same way it does today. Each replayed commit keeps
-its original author locally, but squash-merging the backport PR makes the PR
-owner the author of the commit that lands on `v1` and records the original
-author as a `Co-authored-by:` trailer.
+Authorship follows the same mechanism as today, with one visible change. Each
+replayed commit keeps its original author, and squash-merging the backport PR
+makes the PR owner the author of the commit that lands on `v1`, recording the
+original author as a `Co-authored-by:` trailer. Because these pull requests are
+opened by `github-actions[bot]`, that owner is now the bot: `git blame` on `v1`
+will point at it, and the human author is the trailer.
 
 Two things the tooling cannot do for you:
 

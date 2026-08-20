@@ -62,6 +62,10 @@ concurrency:
 
 jobs:
   backport:
+    # Only the upstream repository has a v1 branch and the labels this reads.
+    # A fork that enables Actions would otherwise go red on every push to its
+    # own main, on a job that cannot do anything useful there.
+    if: github.repository == 'google/adk-go'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -91,9 +95,11 @@ jobs:
           args=()
           if [ -n "${PRS:-}" ] && [ "${PRS}" != "all" ]; then
             # Validated rather than trusted: the split below turns whatever this
-            # holds into separate arguments, and an option among them would be
-            # read as one.
-            if ! printf '%s' "${PRS}" | grep -qE '^[0-9]+([[:space:]]+[0-9]+)*$'; then
+            # holds into separate arguments, and an option or a glob among them
+            # would be read as one. Matched with [[ =~ ]] rather than grep,
+            # which is line-oriented -- $'1301\n*' satisfies a grep anchored to
+            # ^...$ and then globs against the repository root.
+            if [[ ! "${PRS}" =~ ^[0-9]+([[:blank:]]+[0-9]+)*$ ]]; then
               echo "::error::prs must be PR numbers separated by spaces, or 'all'"
               exit 1
             fi

@@ -31,6 +31,15 @@
 # is never touched.
 
 set -euo pipefail
+
+# inherit_errexit needs bash 4.4; macOS still ships 3.2 as /bin/bash. Checked
+# before it is used, so the failure names the requirement instead of printing a
+# bare `shopt: invalid option` and exiting 1.
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+  printf 'error: bash >= 4.4 required, found %s.\n' "${BASH_VERSION}" >&2
+  printf '  On macOS: brew install bash, then run with that bash.\n' >&2
+  exit 1
+fi
 # Without this, a `die` inside a command substitution is silently ignored and
 # the caller carries on with an empty result.
 shopt -s inherit_errexit
@@ -101,9 +110,13 @@ detect_remote() {
     printf '%s\n' "${ADK_REMOTE}"
     return
   fi
+  # Anchored to the end of the URL: a substring match would also accept a remote
+  # pointing at google/adk-go-experimental.
   local remote url
   while read -r remote url _; do
-    if [[ "${url}" == *"${REPO}"* ]]; then
+    url="${url%.git}"
+    url="${url%/}"
+    if [[ "${url}" == *"/${REPO}" || "${url}" == *":${REPO}" ]]; then
       printf '%s\n' "${remote}"
       return
     fi
@@ -118,12 +131,21 @@ detect_remote() {
 # something the automation owns. Reading PR numbers out of commit subjects and
 # titles instead would mean parsing prose: "Fixes #1152" names an issue, and one
 # v1 commit lists seven PR numbers precisely because they were *not* backported.
+# The --grep only narrows: it matches the phrase anywhere in a message, and a
+# squash merge copies contributor commit bodies onto v1 verbatim, so a v1 commit
+# that merely quotes the line would otherwise suppress an unrelated backport.
+# Each candidate is then confirmed against the exact trailer line.
 already_backported() {
-  local remote="$1" sha="$2" found
-  found="$(git log --format=%H --fixed-strings \
-    --grep="cherry picked from commit ${sha}" \
-    "${remote}/${V1_BRANCH}" | head -1)"
-  [[ -n "${found}" ]]
+  local remote="$1" sha="$2" candidate
+  local trailer="(cherry picked from commit ${sha})"
+  while read -r candidate; do
+    [[ -n "${candidate}" ]] || continue
+    if git show -s --format=%B "${candidate}" | grep -Fxq "${trailer}"; then
+      return 0
+    fi
+  done < <(git log --format=%H --fixed-strings \
+    --grep="cherry picked from commit ${sha}" "${remote}/${V1_BRANCH}")
+  return 1
 }
 
 # True when a backport branch for this PR is already pushed, meaning a backport
@@ -181,8 +203,17 @@ To finish it by hand:
 scripts/backport.sh ${pr}
 \`\`\`
 
-That leaves the conflicts in a scratch worktree with \`.rej\` files. Re-run with
-\`--pr\` once it builds.
+That leaves the conflicts as \`.rej\` files in a scratch worktree and prints its
+path. Finish it in that worktree — **do not re-run the script**, which starts
+from a clean replay and discards what you resolved:
+
+\`\`\`bash
+cd <the worktree it printed>
+# resolve the .rej files, then:
+git add -A && git commit -m '<message>'
+git push <remote> HEAD:refs/heads/${BRANCH_PREFIX}${pr}
+gh pr create --repo ${REPO} --base ${V1_BRANCH} --head ${BRANCH_PREFIX}${pr}
+\`\`\`
 
 This is reported once. The backport is still queued and will be retried, so if a
 later \`${V1_BRANCH}\` change makes it apply, it lands without further action." >/dev/null ||
@@ -201,11 +232,34 @@ backport_one() {
   local worktree="${TMPDIR:-/tmp}/adk-backport/${branch//\//-}"
   local subject author date patch message
 
-  git cat-file -e "${sha}^{commit}" 2>/dev/null ||
-    die "commit ${sha} for PR #${pr} is not in this clone; fetch and retry"
+  if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+    warn "commit ${sha} for PR #${pr} is not in this clone; fetch and retry"
+    return 3
+  fi
 
   subject="$(git log -1 --format=%s "${sha}")"
   info "PR #${pr}: ${subject}"
+
+  # A squash merge puts the whole pull request in one commit, which is what the
+  # replay below assumes. A rebase merge does not: mergeCommit.oid is then only
+  # the last commit of the branch, so a multi-commit PR would be backported in
+  # part, apply cleanly, and clear itself from the queue on the trailer -- a
+  # silent half-backport. Every merge on main so far is a squash, but the
+  # repository allows rebase merges, so it is asserted rather than assumed.
+  local pr_files commit_files missing
+  if pr_files="$(gh pr view "${pr}" --repo "${REPO}" --json files \
+    --jq '[.files[].path] | sort | .[]' 2>/dev/null)" && [[ -n "${pr_files}" ]]; then
+    commit_files="$(git show --name-only --format= "${sha}" | sort -u)"
+    missing="$(comm -23 <(printf '%s\n' "${pr_files}") <(printf '%s\n' "${commit_files}"))"
+    if [[ -n "${missing}" ]]; then
+      warn "  merge commit ${sha:0:8} does not carry the whole of PR #${pr}
+  Missing: $(printf '%s ' ${missing})
+  This is what a rebase merge looks like, where the recorded merge commit is
+  only the last commit of the branch. Backporting it would ship part of the
+  change and then mark the PR done. Cherry-pick the range by hand instead."
+      return 3
+    fi
+  fi
 
   # Clear any leftover from an earlier run. Removing the directory alone is not
   # enough: git keeps the worktree registered in .git/worktrees and then refuses
@@ -214,27 +268,48 @@ backport_one() {
   rm -rf "${worktree}"
   git worktree prune
   mkdir -p "$(dirname "${worktree}")"
-  git worktree add --quiet --detach "${worktree}" "${remote}/${V1_BRANCH}"
-  git -C "${worktree}" checkout --quiet -B "${branch}"
+
+  # Deliberately detached, and it stays that way: nothing here creates a local
+  # branch. A named branch would have to be resolved again at push time, and if
+  # the name already existed in this clone the push would send that instead of
+  # the replay. HEAD is the only thing committed to and the only thing pushed.
+  #
+  # Checked rather than assumed: with `|| status=$?` at the call site, errexit
+  # is inert for this whole function, so a failure here would otherwise fall
+  # through to `git apply` and be reported to the contributor as a conflict in
+  # their patch.
+  if ! git worktree add --quiet --detach "${worktree}" "${remote}/${V1_BRANCH}"; then
+    warn "  could not create worktree ${worktree}"
+    return 3
+  fi
 
   local -a pathspec=()
   if [[ "${skip_gomod}" == true ]]; then
-    pathspec=(-- . ':(exclude)go.mod' ':(exclude)go.sum'
-      ':(exclude)*/go.mod' ':(exclude)*/go.sum')
+    # :(top) anchors to the repository root; without it a run from a
+    # subdirectory silently narrows the patch to that subtree.
+    pathspec=(-- ':(top)' ':(top,exclude)go.mod' ':(top,exclude)go.sum'
+      ':(top,exclude)*/go.mod' ':(top,exclude)*/go.sum')
   fi
 
-  patch="$(mktemp)"
+  # BSD mktemp wants a template, so give it one on every platform.
+  patch="$(mktemp "${TMPDIR:-/tmp}/adk-backport-patch.XXXXXX")"
 
   # A main squash commit has a single parent, so `git show` is the whole change.
   # Rewriting the module path makes the context lines match the v1 tree, which
   # is what lets the patch apply directly.
   git show --binary --format= "${sha}" "${pathspec[@]}" |
-    sed "s|${V2_MODULE}|${V1_MODULE}|g" >"${patch}"
+    sed "s|${V2_MODULE}|${V1_MODULE}|g" |
+    # Put back the one place that rewrite is wrong: a go.mod require line reads
+    # `google.golang.org/adk/v2 v2.0.0`, and dropping the /v2 leaves
+    # `google.golang.org/adk v2.0.0`, which the go tool rejects outright
+    # ("should be v0 or v1, not v2"). Left alone the hunk simply fails to
+    # apply, which is the honest outcome: the 1.x dependency set differs.
+    sed -E "s|${V1_MODULE} (v2[0-9.])|${V2_MODULE} \1|g" >"${patch}"
 
   if [[ ! -s "${patch}" ]]; then
     warn "  empty patch; nothing to backport"
     rm -f "${patch}"
-    cleanup_worktree "${worktree}" "${branch}"
+    cleanup_worktree "${worktree}"
     return 2
   fi
 
@@ -243,7 +318,7 @@ backport_one() {
     if [[ "${open_pr}" == true ]]; then
       # Unattended: the worktree is worthless to anyone, so take it away.
       rm -f "${patch}"
-      cleanup_worktree "${worktree}" "${branch}"
+      cleanup_worktree "${worktree}"
       comment_conflict "${pr}"
     else
       # By hand: leave the .rej files where they can be worked on.
@@ -275,12 +350,17 @@ EOF
 
 (cherry picked from commit ${sha})"
 
-  git -C "${worktree}" commit --quiet --author="${author}" --date="${date}" \
-    --message="${message}"
+  if ! git -C "${worktree}" commit --quiet --author="${author}" --date="${date}" \
+    --message="${message}"; then
+    warn "  could not commit the replay in ${worktree}"
+    cleanup_worktree "${worktree}"
+    return 3
+  fi
   info "  applied cleanly"
 
   if [[ "${open_pr}" != true ]]; then
-    info "  branch ${branch} is ready in ${worktree} (nothing pushed)"
+    info "  replay is ready in ${worktree} (nothing pushed)"
+    info "  push it with: git -C ${worktree} push ${remote} HEAD:refs/heads/${branch}"
     return 0
   fi
 
@@ -291,23 +371,29 @@ EOF
 open_backport_pr() {
   local remote="$1" pr="$2" branch="$3" worktree="$4" subject="$5" url
 
-  # Both of these are cheap and both have bitten this script: a branch name from
-  # somewhere unexpected must never reach a push, and a branch with no commits
-  # pushes fine and then fails at PR creation, leaving an orphan behind.
-  [[ "${branch}" == "${BRANCH_PREFIX}"* ]] ||
-    die "refusing to push '${branch}': not a ${BRANCH_PREFIX} branch"
-  [[ "$(git -C "${worktree}" rev-list --count "${remote}/${V1_BRANCH}..HEAD")" -gt 0 ]] ||
-    die "no commits on ${branch}; refusing to push"
+  # Both guards check HEAD, which is what the push below sends -- the point of
+  # keeping the worktree detached. A branch with no commits pushes fine and then
+  # fails at PR creation, leaving an orphan behind.
+  if [[ "${branch}" != "${BRANCH_PREFIX}"* ]]; then
+    warn "refusing to push '${branch}': not a ${BRANCH_PREFIX} branch"
+    cleanup_worktree "${worktree}"
+    return 3
+  fi
+  if [[ "$(git -C "${worktree}" rev-list --count "${remote}/${V1_BRANCH}..HEAD")" -eq 0 ]]; then
+    warn "nothing to push for #${pr}: HEAD is ${V1_BRANCH}"
+    cleanup_worktree "${worktree}"
+    return 3
+  fi
 
   info "  pushing ${branch}"
-  if ! git -C "${worktree}" push --quiet "${remote}" "${branch}"; then
+  if ! git -C "${worktree}" push --quiet "${remote}" "HEAD:refs/heads/${branch}"; then
     warn "could not push ${branch}"
-    cleanup_worktree "${worktree}" "${branch}"
+    cleanup_worktree "${worktree}"
     return 3
   fi
 
   local err
-  err="$(mktemp)"
+  err="$(mktemp "${TMPDIR:-/tmp}/adk-backport-err.XXXXXX")"
   url="$(gh pr create --repo "${REPO}" --base "${V1_BRANCH}" --head "${branch}" \
     --title "${subject}" --body "Backports #${pr} from \`${MAIN_BRANCH}\` to \`${V1_BRANCH}\`.
 
@@ -327,14 +413,22 @@ Generated by \`scripts/backport.sh\`.")" 2>"${err}" || {
     if grep -q 'not permitted to create or approve pull requests' "${err}"; then
       warn "this repository does not allow GitHub Actions to create pull requests.
   Enable Settings -> Actions -> General -> 'Allow GitHub Actions to create and
-  approve pull requests' (it may be inherited from the organization). Branch
-  ${branch} is pushed and the PR can be opened by hand."
+  approve pull requests' (it may be inherited from the organization)."
     else
-      warn "could not open the PR for #${pr}: $(tr '\n' ' ' <"${err}")
-  Branch ${branch} is pushed and can be used by hand."
+      warn "could not open the PR for #${pr}: $(tr '\n' ' ' <"${err}")"
     fi
     rm -f "${err}"
-    cleanup_worktree "${worktree}" "${branch}"
+    # Take the branch back down. in_flight treats a pushed branch as "a backport
+    # is already under way", so leaving it would drop #${pr} out of the queue
+    # for good -- one red run, then silence, with no pull request anywhere.
+    if git -C "${worktree}" push --quiet "${remote}" --delete "${branch}" 2>/dev/null; then
+      info "  removed ${branch}; #${pr} stays queued and will be retried"
+    else
+      warn "could not delete ${branch}. Delete it by hand or #${pr} will be
+  treated as already in flight and never retried:
+    git push ${remote} --delete ${branch}"
+    fi
+    cleanup_worktree "${worktree}"
     return 3
   }
   rm -f "${err}"
@@ -345,13 +439,14 @@ Generated by \`scripts/backport.sh\`.")" 2>"${err}" || {
   gh pr edit "${url##*/}" --repo "${REPO}" --add-label "${V1_LABEL}" >/dev/null ||
     warn "could not add the '${V1_LABEL}' label; add it by hand"
 
-  cleanup_worktree "${worktree}" "${branch}"
+  cleanup_worktree "${worktree}"
 }
 
+# No branch to delete: the worktree is detached throughout, so the only ref this
+# script ever writes is the remote one it pushes.
 cleanup_worktree() {
-  local worktree="$1" branch="$2"
+  local worktree="$1"
   git worktree remove --force "${worktree}" 2>/dev/null || rm -rf "${worktree}"
-  git branch -D "${branch}" >/dev/null 2>&1 || true
 }
 
 main() {
