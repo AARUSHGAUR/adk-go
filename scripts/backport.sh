@@ -136,15 +136,23 @@ detect_remote() {
 # that merely quotes the line would otherwise suppress an unrelated backport.
 # Each candidate is then confirmed against the exact trailer line.
 already_backported() {
-  local remote="$1" sha="$2" candidate
+  local remote="$1" sha="$2" candidates candidate
   local trailer="(cherry picked from commit ${sha})"
+  # Captured rather than piped straight into the loop: a git failure inside a
+  # process substitution is invisible, and would read here as "no candidates",
+  # meaning not yet backported -- which opens a duplicate pull request. Same
+  # failure mode as the `gh pr list` one below, so it fails closed the same way.
+  if ! candidates="$(git log --format=%H --fixed-strings \
+    --grep="cherry picked from commit ${sha}" "${remote}/${V1_BRANCH}")"; then
+    die "could not search ${V1_BRANCH} for an existing backport of ${sha}"
+  fi
+  [[ -n "${candidates}" ]] || return 1
   while read -r candidate; do
     [[ -n "${candidate}" ]] || continue
     if git show -s --format=%B "${candidate}" | grep -Fxq "${trailer}"; then
       return 0
     fi
-  done < <(git log --format=%H --fixed-strings \
-    --grep="cherry picked from commit ${sha}" "${remote}/${V1_BRANCH}")
+  done <<<"${candidates}"
   return 1
 }
 
@@ -253,7 +261,7 @@ backport_one() {
     missing="$(comm -23 <(printf '%s\n' "${pr_files}") <(printf '%s\n' "${commit_files}"))"
     if [[ -n "${missing}" ]]; then
       warn "  merge commit ${sha:0:8} does not carry the whole of PR #${pr}
-  Missing: $(printf '%s ' ${missing})
+  Missing: $(printf '%s' "${missing}" | tr '\n' ' ')
   This is what a rebase merge looks like, where the recorded merge commit is
   only the last commit of the branch. Backporting it would ship part of the
   change and then mark the PR done. Cherry-pick the range by hand instead."

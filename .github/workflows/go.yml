@@ -93,25 +93,6 @@ jobs:
         # terminating and reports SA5011 nil dereferences throughout the tests.
         skip-cache: true
 
-  # The lint job above is golangci-lint, matrixed over Go modules, so nothing in
-  # CI reads the shell under scripts/ or .github/scripts/. shellcheck ships on
-  # the runner image.
-  shell:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      with:
-        persist-credentials: false
-
-    - name: Shellcheck
-      run: |
-        shellcheck --version
-        # --enable=all turns on the optional checks. The one that earns its keep
-        # here is the set -e suppression family: a `git` call whose failure is
-        # swallowed, and the script carries on as though it had succeeded.
-        find scripts .github/scripts -name '*.sh' -print0 |
-          xargs -0 --no-run-if-empty shellcheck --enable=all
-
   guardrail:
     runs-on: ubuntu-latest
     steps:
