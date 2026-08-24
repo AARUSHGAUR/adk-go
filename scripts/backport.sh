@@ -334,12 +334,17 @@ backport_one() {
       rm -f "${patch}"
       cat >&2 <<EOF
 
-  Conflicts are in ${worktree}, as *.rej files. To finish:
+  Conflicts are in ${worktree}, as *.rej files. Finish them there -- do not
+  re-run the script, which starts from a clean replay and discards this:
 
     cd ${worktree}
     # resolve the .rej files, then:
     git add -A && git commit -m '<message>'
-    git push ${remote} ${branch} && gh pr create --base ${V1_BRANCH}
+    git push ${remote} HEAD:refs/heads/${branch}
+    gh pr create --repo ${REPO} --base ${V1_BRANCH} --head ${branch}
+
+  The worktree is detached on purpose, so the push needs the HEAD:refs/heads/
+  form: there is no local branch of that name to push by name.
 
 EOF
     fi
