@@ -287,9 +287,18 @@ backport_one() {
   #
   # Paginated: `gh pr view --json files` stops at 100 (#1109 has 547), which
   # made the comparison quieter than it read.
+  # Fails closed. A guard against a silent half-backport must not disable itself
+  # silently: if the file list cannot be fetched, the merge shape is unknown,
+  # and unknown is not the same as fine.
   local pr_files commit_files missing
-  if pr_files="$(gh api --paginate "repos/${REPO}/pulls/${pr}/files" \
-    --jq '.[].filename' 2>/dev/null | LC_ALL=C sort -u)" && [[ -n "${pr_files}" ]]; then
+  if ! pr_files="$(gh api --paginate "repos/${REPO}/pulls/${pr}/files" \
+    --jq '.[].filename')"; then
+    warn "  could not list the files of PR #${pr}, so the merge shape cannot be
+  checked. Refusing rather than risking a partial backport of a rebase merge."
+    return 3
+  fi
+  pr_files="$(printf '%s\n' "${pr_files}" | LC_ALL=C sort -u)"
+  if [[ -n "${pr_files}" ]]; then
     commit_files="$(git -c core.quotePath=false show --name-only --format= "${sha}" |
       LC_ALL=C sort -u)"
     missing="$(LC_ALL=C comm -23 <(printf '%s\n' "${pr_files}") <(printf '%s\n' "${commit_files}"))"
