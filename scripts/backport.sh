@@ -161,7 +161,11 @@ already_backported() {
 # the PR, which is the escape hatch when one goes stale.
 in_flight() {
   local remote="$1" pr="$2"
-  git ls-remote --exit-code --heads "${remote}" "${BRANCH_PREFIX}${pr}" >/dev/null 2>&1
+  # Fully qualified: a bare name is matched against the tail of every ref, so
+  # someone's `<user>/backport/v1/pr-<n>` would read as this backport already
+  # being under way and drop the PR from the queue for good.
+  git ls-remote --exit-code --heads "${remote}" \
+    "refs/heads/${BRANCH_PREFIX}${pr}" >/dev/null 2>&1
 }
 
 # Prints "number<TAB>merge-sha<TAB>title" for each pending PR, oldest merge
@@ -189,9 +193,19 @@ pending_queue() {
 
 # Comments on the original PR asking for a manual backport, at most once.
 comment_conflict() {
-  local pr="$1" existing
+  local pr="$1" existing me
+  # Authored-by filter: the marker is public, so without it anyone can post it
+  # on a pull request before it ever conflicts and permanently suppress the only
+  # signal a human gets. Accepts the bot (how CI posts) or whoever is
+  # authenticated (how a local --pr run posts), and nobody else.
+  # gh's --jq takes no --arg, so both values are interpolated. The marker is a
+  # readonly constant and a login is [A-Za-z0-9-]; an empty login simply matches
+  # nothing, which is the safe direction.
+  me="$(gh api user --jq '.login' 2>/dev/null || echo '')"
   existing="$(gh pr view "${pr}" --repo "${REPO}" --json comments \
-    --jq '[.comments[].body | select(contains("'"${COMMENT_MARKER}"'"))] | length')" ||
+    --jq '[.comments[]
+      | select(.author.login == "github-actions[bot]" or .author.login == "'"${me}"'")
+      | select(.body | contains("'"${COMMENT_MARKER}"'"))] | length')" ||
     {
       warn "could not read comments on PR #${pr}; not commenting"
       return 0
@@ -217,8 +231,13 @@ from a clean replay and discards what you resolved:
 
 \`\`\`bash
 cd <the worktree it printed>
-# resolve the .rej files, then:
-git add -A && git commit -m '<message>'
+# resolve the conflicts, then drop the .rej files git apply left behind:
+find . -name '*.rej' -delete
+# -u stages tracked files only, so nothing stray rides along:
+git add -u
+git commit -m '<subject>
+
+(cherry picked from commit <sha of the main commit>)'
 git push <remote> HEAD:refs/heads/${BRANCH_PREFIX}${pr}
 gh pr create --repo ${REPO} --base ${V1_BRANCH} --head ${BRANCH_PREFIX}${pr}
 \`\`\`
@@ -230,10 +249,11 @@ later \`${V1_BRANCH}\` change makes it apply, it lands without further action." 
 
 # Replays one PR onto its own branch and, with --pr, opens the backport PR.
 #
-# Returns 0 on success, 1 on conflict, 2 when the patch is empty, 3 when the
-# push or the PR call failed. The distinction matters: a conflict is a normal
-# outcome that a human resolves, while a 3 means the tooling could not do its
-# job and the run should go red.
+# Returns 0 on success, 1 on conflict, 2 when the patch is genuinely empty, and
+# 3 for anything the tooling could not do -- a missing commit, a merge commit
+# that does not carry the whole PR, a worktree, patch, commit, push or PR call
+# that failed. The distinction is what matters: a conflict is a normal outcome
+# that a human resolves and leaves the run green, while a 3 goes red.
 backport_one() {
   local remote="$1" pr="$2" sha="$3"
   local branch="${BRANCH_PREFIX}${pr}"
@@ -254,11 +274,25 @@ backport_one() {
   # part, apply cleanly, and clear itself from the queue on the trailer -- a
   # silent half-backport. Every merge on main so far is a squash, but the
   # repository allows rebase merges, so it is asserted rather than assumed.
+  # Both sides are sorted and compared under LC_ALL=C. jq sorts by codepoint and
+  # sort(1) by locale, and the two disagree wherever a name starts with a
+  # non-alphanumeric -- `.github/...` against `CONTRIBUTING.md` under
+  # en_US.UTF-8. comm then reports present files as missing and this guard
+  # refuses an ordinary squash merge. CI never saw it because the runner is
+  # C.UTF-8; a workstation is not, and this path is the one CONTRIBUTING and the
+  # conflict comment both point people at.
+  #
+  # quotePath off for the same reason: git C-escapes a non-ASCII path where the
+  # API returns it raw, which breaks the comparison on the runner too.
+  #
+  # Paginated: `gh pr view --json files` stops at 100 (#1109 has 547), which
+  # made the comparison quieter than it read.
   local pr_files commit_files missing
-  if pr_files="$(gh pr view "${pr}" --repo "${REPO}" --json files \
-    --jq '[.files[].path] | sort | .[]' 2>/dev/null)" && [[ -n "${pr_files}" ]]; then
-    commit_files="$(git show --name-only --format= "${sha}" | sort -u)"
-    missing="$(comm -23 <(printf '%s\n' "${pr_files}") <(printf '%s\n' "${commit_files}"))"
+  if pr_files="$(gh api --paginate "repos/${REPO}/pulls/${pr}/files" \
+    --jq '.[].filename' 2>/dev/null | LC_ALL=C sort -u)" && [[ -n "${pr_files}" ]]; then
+    commit_files="$(git -c core.quotePath=false show --name-only --format= "${sha}" |
+      LC_ALL=C sort -u)"
+    missing="$(LC_ALL=C comm -23 <(printf '%s\n' "${pr_files}") <(printf '%s\n' "${commit_files}"))"
     if [[ -n "${missing}" ]]; then
       warn "  merge commit ${sha:0:8} does not carry the whole of PR #${pr}
   Missing: $(printf '%s' "${missing}" | tr '\n' ' ')
@@ -300,7 +334,11 @@ backport_one() {
   fi
 
   # BSD mktemp wants a template, so give it one on every platform.
-  patch="$(mktemp "${TMPDIR:-/tmp}/adk-backport-patch.XXXXXX")"
+  if ! patch="$(mktemp "${TMPDIR:-/tmp}/adk-backport-patch.XXXXXX")"; then
+    warn "  could not create a temporary file for the patch"
+    cleanup_worktree "${worktree}"
+    return 3
+  fi
 
   # A main squash commit has a single parent, so `git show` is the whole change.
   # Rewriting the module path makes the context lines match the v1 tree, which
@@ -313,6 +351,22 @@ backport_one() {
     # ("should be v0 or v1, not v2"). Left alone the hunk simply fails to
     # apply, which is the honest outcome: the 1.x dependency set differs.
     sed -E "s|${V1_MODULE} (v2[0-9.])|${V2_MODULE} \1|g" >"${patch}"
+
+  # Checked, and checked before the emptiness test. errexit is inert in this
+  # function (the call site is `|| status=$?`), so a failed `git show` would
+  # otherwise leave an empty file, be read as "nothing to backport", and be
+  # tallied as a benign skip on a green run. Of the four return codes 2 is the
+  # one that quietly absorbs tooling failure, so it has to be earned.
+  local -a pipe_status=("${PIPESTATUS[@]}")
+  local stage
+  for stage in "${pipe_status[@]}"; do
+    if [[ "${stage}" -ne 0 ]]; then
+      warn "  could not build the patch for #${pr} (pipeline status: ${pipe_status[*]})"
+      rm -f "${patch}"
+      cleanup_worktree "${worktree}"
+      return 3
+    fi
+  done
 
   if [[ ! -s "${patch}" ]]; then
     warn "  empty patch; nothing to backport"
@@ -338,8 +392,13 @@ backport_one() {
   re-run the script, which starts from a clean replay and discards this:
 
     cd ${worktree}
-    # resolve the .rej files, then:
-    git add -A && git commit -m '<message>'
+    # resolve the conflicts, then drop the .rej files git apply left behind:
+    find . -name '*.rej' -delete
+    # -u stages tracked files only, so no .rej can ride along onto ${V1_BRANCH}:
+    git add -u
+    git commit -m '<subject>
+
+(cherry picked from commit ${sha})'
     git push ${remote} HEAD:refs/heads/${branch}
     gh pr create --repo ${REPO} --base ${V1_BRANCH} --head ${branch}
 
@@ -384,9 +443,11 @@ EOF
 open_backport_pr() {
   local remote="$1" pr="$2" branch="$3" worktree="$4" subject="$5" url
 
-  # Both guards check HEAD, which is what the push below sends -- the point of
-  # keeping the worktree detached. A branch with no commits pushes fine and then
-  # fails at PR creation, leaving an orphan behind.
+  # The invariant is held by construction: `branch` is the readonly prefix plus
+  # an integer. This is an assertion against a future refactor passing something
+  # else, not the thing that makes it safe. The second guard is load-bearing: a
+  # branch with no commits pushes fine and then fails at PR creation, leaving an
+  # orphan behind. Both read HEAD, which is what the push sends.
   if [[ "${branch}" != "${BRANCH_PREFIX}"* ]]; then
     warn "refusing to push '${branch}': not a ${BRANCH_PREFIX} branch"
     cleanup_worktree "${worktree}"
@@ -420,7 +481,7 @@ If the merge box says the workflows are awaiting approval, click **Approve
 workflows to run**: pull requests opened by \`github-actions[bot]\` start their
 CI held.
 
-Generated by \`scripts/backport.sh\`.")" 2>"${err}" || {
+Generated by \`scripts/backport.sh\`." 2>"${err}")" || {
     # The one failure that is a repository setting rather than a mistake, and
     # the error for it reads as a bare permissions problem otherwise.
     if grep -q 'not permitted to create or approve pull requests' "${err}"; then
@@ -499,7 +560,18 @@ clone cannot be used, check out with fetch-depth: 0"
   fi
 
   if [[ -z "${queue}" ]]; then
-    info "nothing pending: no merged '${MAIN_BRANCH}' PR labelled '${BACKPORT_LABEL}' is missing from '${V1_BRANCH}'"
+    if [[ ${#prs[@]} -gt 0 ]]; then
+      # Asked about specific numbers: say something about those, not about the
+      # queue as a whole. This is the command the conflict comment tells a
+      # contributor to run, so "nothing pending" reads as though their PR does
+      # not need a backport at all.
+      info "nothing to do for ${prs[*]/#/#}. A PR is skipped when it is already
+  on '${V1_BRANCH}', when its '${BRANCH_PREFIX}<n>' branch is already pushed, or
+  when it is not a merged '${MAIN_BRANCH}' PR labelled '${BACKPORT_LABEL}'.
+  Run --list to see the whole queue."
+    else
+      info "nothing pending: no merged '${MAIN_BRANCH}' PR labelled '${BACKPORT_LABEL}' is missing from '${V1_BRANCH}'"
+    fi
     return 0
   fi
 

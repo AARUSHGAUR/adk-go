@@ -67,6 +67,10 @@ jobs:
     # own main, on a job that cannot do anything useful there.
     if: github.repository == 'google/adk-go'
     runs-on: ubuntu-latest
+    # The concurrency group above is serialized, so a wedged run holds up every
+    # later backport. Six hours of that is the default; ten minutes is already
+    # generous for a replay plus a handful of API calls.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
