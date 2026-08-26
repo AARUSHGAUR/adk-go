@@ -160,12 +160,19 @@ already_backported() {
 # PR is open or was opened and its branch kept. Deleting the branch re-queues
 # the PR, which is the escape hatch when one goes stale.
 in_flight() {
-  local remote="$1" pr="$2"
-  # Fully qualified: a bare name is matched against the tail of every ref, so
-  # someone's `<user>/backport/v1/pr-<n>` would read as this backport already
-  # being under way and drop the PR from the queue for good.
-  git ls-remote --exit-code --heads "${remote}" \
-    "refs/heads/${BRANCH_PREFIX}${pr}" >/dev/null 2>&1
+  local pr="$1" open_prs
+  # An open pull request, not merely a branch. Branch-existence conflated "a
+  # backport is under way" with "one was attempted and the run died", and only
+  # the second is silent: a job killed between the push and `gh pr create`
+  # leaves a branch that would exclude its PR from every later run. Keyed on the
+  # head ref, which this script owns.
+  #
+  # Fails loudly rather than guessing, the same way the queue listing does: a
+  # wrong answer here either duplicates a pull request or drops one silently.
+  open_prs="$(gh pr list --repo "${REPO}" --head "${BRANCH_PREFIX}${pr}" \
+    --state open --json number --jq 'length')" ||
+    die "could not check for an open backport of #${pr}"
+  [[ "${open_prs}" != "0" ]]
 }
 
 # Prints "number<TAB>merge-sha<TAB>title" for each pending PR, oldest merge
@@ -186,22 +193,29 @@ pending_queue() {
       continue
     fi
     already_backported "${remote}" "${sha}" && continue
-    in_flight "${remote}" "${number}" && continue
+    in_flight "${number}" && continue
     printf '%s\t%s\t%s\n' "${number}" "${sha}" "${title}"
   done <<<"${listing}"
 }
 
 # Comments on the original PR asking for a manual backport, at most once.
 comment_conflict() {
-  local pr="$1" existing me
+  local pr="$1" sha="$2" existing me
   # Authored-by filter: the marker is public, so without it anyone can post it
   # on a pull request before it ever conflicts and permanently suppress the only
   # signal a human gets. Accepts the bot (how CI posts) or whoever is
   # authenticated (how a local --pr run posts), and nobody else.
   # gh's --jq takes no --arg, so both values are interpolated. The marker is a
-  # readonly constant and a login is [A-Za-z0-9-]; an empty login simply matches
-  # nothing, which is the safe direction.
-  me="$(gh api user --jq '.login' 2>/dev/null || echo '')"
+  # readonly constant; the login has to be validated, because on an API error
+  # `gh api --jq` prints the response body to *stdout* -- 2>/dev/null does not
+  # suppress it and `|| echo ''` only appends to it. Unvalidated, a failed call
+  # puts a JSON blob into the filter, jq refuses to parse it, `gh pr view` exits
+  # non-zero into the handler below, and the conflict comment silently never
+  # posts. That is the CI path: GITHUB_TOKEN is an installation token and
+  # GET /user needs user-to-server auth. Anything that is not a login is
+  # dropped, and an empty login matches no author.
+  me="$(gh api user --jq '.login' 2>/dev/null)" || me=''
+  [[ "${me}" =~ ^[A-Za-z0-9-]{1,39}$ ]] || me=''
   existing="$(gh pr view "${pr}" --repo "${REPO}" --json comments \
     --jq '[.comments[]
       | select(.author.login == "github-actions[bot]" or .author.login == "'"${me}"'")
@@ -233,11 +247,12 @@ from a clean replay and discards what you resolved:
 cd <the worktree it printed>
 # resolve the conflicts, then drop the .rej files git apply left behind:
 find . -name '*.rej' -delete
-# -u stages tracked files only, so nothing stray rides along:
-git add -u
+# -A, so files the patch *added* are included: apply --reject leaves them
+# untracked, and -u would stage only what git already knew about:
+git add -A
 git commit -m '<subject>
 
-(cherry picked from commit <sha of the main commit>)'
+(cherry picked from commit ${sha})'
 git push <remote> HEAD:refs/heads/${BRANCH_PREFIX}${pr}
 gh pr create --repo ${REPO} --base ${V1_BRANCH} --head ${BRANCH_PREFIX}${pr}
 \`\`\`
@@ -290,17 +305,38 @@ backport_one() {
   # Fails closed. A guard against a silent half-backport must not disable itself
   # silently: if the file list cannot be fetched, the merge shape is unknown,
   # and unknown is not the same as fine.
-  local pr_files commit_files missing
-  if ! pr_files="$(gh api --paginate "repos/${REPO}/pulls/${pr}/files" \
-    --jq '.[].filename')"; then
-    warn "  could not list the files of PR #${pr}, so the merge shape cannot be
+  # Counts first, so the common case costs one request. Paginating the file list
+  # up front turned a 547-file pull request into ~19 requests, each of which can
+  # now fail into the refusal below -- the cheap check and the fail-closed
+  # behaviour compose into a new way for a green run to go red. A squash carries
+  # the whole pull request, so the counts match; a rebase merge records only the
+  # last commit, so they do not. The full list is fetched only once they differ,
+  # to name what is missing.
+  #
+  # Residual: equal counts over different sets would pass. That needs the last
+  # commit of a rebase to touch exactly as many files as the whole branch, and
+  # such a patch would almost certainly fail to apply anyway.
+  local pr_changed commit_files commit_count pr_files missing
+  if ! pr_changed="$(gh pr view "${pr}" --repo "${REPO}" --json changedFiles \
+    --jq '.changedFiles')" || [[ ! "${pr_changed}" =~ ^[0-9]+$ ]]; then
+    warn "  could not count the files of PR #${pr}, so the merge shape cannot be
   checked. Refusing rather than risking a partial backport of a rebase merge."
     return 3
   fi
-  pr_files="$(printf '%s\n' "${pr_files}" | LC_ALL=C sort -u)"
-  if [[ -n "${pr_files}" ]]; then
-    commit_files="$(git -c core.quotePath=false show --name-only --format= "${sha}" |
-      LC_ALL=C sort -u)"
+  commit_files="$(git -c core.quotePath=false show --name-only --format= "${sha}" |
+    LC_ALL=C sort -u)"
+  commit_count="$(printf '%s' "${commit_files}" | grep -c '^' || true)"
+  [[ -n "${commit_files}" ]] || commit_count=0
+
+  if [[ "${commit_count}" -ne "${pr_changed}" ]]; then
+    if ! pr_files="$(gh api --paginate "repos/${REPO}/pulls/${pr}/files" \
+      --jq '.[].filename')"; then
+      warn "  PR #${pr} reports ${pr_changed} changed files but merge commit
+  ${sha:0:8} carries ${commit_count}, and the file list could not be fetched to
+  say which. Refusing rather than risking a partial backport."
+      return 3
+    fi
+    pr_files="$(printf '%s\n' "${pr_files}" | LC_ALL=C sort -u)"
     missing="$(LC_ALL=C comm -23 <(printf '%s\n' "${pr_files}") <(printf '%s\n' "${commit_files}"))"
     if [[ -n "${missing}" ]]; then
       warn "  merge commit ${sha:0:8} does not carry the whole of PR #${pr}
@@ -390,7 +426,7 @@ backport_one() {
       # Unattended: the worktree is worthless to anyone, so take it away.
       rm -f "${patch}"
       cleanup_worktree "${worktree}"
-      comment_conflict "${pr}"
+      comment_conflict "${pr}" "${sha}"
     else
       # By hand: leave the .rej files where they can be worked on.
       git -C "${worktree}" apply --reject "${patch}" || true
@@ -403,8 +439,9 @@ backport_one() {
     cd ${worktree}
     # resolve the conflicts, then drop the .rej files git apply left behind:
     find . -name '*.rej' -delete
-    # -u stages tracked files only, so no .rej can ride along onto ${V1_BRANCH}:
-    git add -u
+    # -A, so files the patch *added* are included; the delete above is what
+    # keeps .rej files off ${V1_BRANCH}:
+    git add -A
     git commit -m '<subject>
 
 (cherry picked from commit ${sha})'
@@ -501,14 +538,14 @@ Generated by \`scripts/backport.sh\`." 2>"${err}")" || {
       warn "could not open the PR for #${pr}: $(tr '\n' ' ' <"${err}")"
     fi
     rm -f "${err}"
-    # Take the branch back down. in_flight treats a pushed branch as "a backport
-    # is already under way", so leaving it would drop #${pr} out of the queue
-    # for good -- one red run, then silence, with no pull request anywhere.
+    # Take the branch back down. in_flight keys on an open pull request now, so
+    # a leftover branch no longer excludes #${pr} -- but it would collide with
+    # the next attempt's push, so it still goes.
     if git -C "${worktree}" push --quiet "${remote}" --delete "${branch}" 2>/dev/null; then
       info "  removed ${branch}; #${pr} stays queued and will be retried"
     else
-      warn "could not delete ${branch}. Delete it by hand or #${pr} will be
-  treated as already in flight and never retried:
+      warn "could not delete ${branch}; the next attempt for #${pr} will have to
+  force past it or you can remove it by hand:
     git push ${remote} --delete ${branch}"
     fi
     cleanup_worktree "${worktree}"
@@ -522,7 +559,11 @@ Generated by \`scripts/backport.sh\`." 2>"${err}")" || {
   gh pr edit "${url##*/}" --repo "${REPO}" --add-label "${V1_LABEL}" >/dev/null ||
     warn "could not add the '${V1_LABEL}' label; add it by hand"
 
+  # Explicit: as the last statement, cleanup_worktree's status would become this
+  # function's, so a worktree that refused to go away would report a landed
+  # backport as a conflict and tell the contributor to redo it by hand.
   cleanup_worktree "${worktree}"
+  return 0
 }
 
 # No branch to delete: the worktree is detached throughout, so the only ref this

@@ -88,9 +88,11 @@ file's import block out of sync between the two branches.
 
 A PR leaves the queue when its change reaches `v1` — matched on the
 `(cherry picked from commit <sha>)` trailer the script writes, not on anything
-parsed out of a title — or while its `backport/v1/pr-<n>` branch exists. Delete
-that branch and the PR is queued again, which is how you regenerate a backport
-that went stale.
+parsed out of a title — or while a backport pull request for it is open. Close
+that pull request and delete its `backport/v1/pr-<n>` branch and the PR is
+queued again, which is how you regenerate a backport that went stale. A branch
+left behind by a run that died does not suppress anything: the next run replays
+it.
 
 Backport PRs get the usual CI, because the `pull_request` triggers in `go.yml`
 and `apidiff.yml` filter on the base branch and list `v1` — but **the runs start
