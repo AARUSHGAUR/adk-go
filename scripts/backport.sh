@@ -313,9 +313,13 @@ backport_one() {
   # last commit, so they do not. The full list is fetched only once they differ,
   # to name what is missing.
   #
-  # Residual: equal counts over different sets would pass. That needs the last
-  # commit of a rebase to touch exactly as many files as the whole branch, and
-  # such a patch would almost certainly fail to apply anyway.
+  # Residual, and it is wider than the counts: this compares file *names*, so a
+  # rebase whose last commit touches the same files as the whole branch clears
+  # both the count check and the comm below. Comparing lists rather than content
+  # is what allows that; the count step neither introduced it nor widened it.
+  # What covers it is the replay itself -- that last commit's patch is written
+  # against a parent that is not on v1, so it would almost certainly fail to
+  # apply rather than land silently.
   local pr_changed commit_files commit_count pr_files missing
   if ! pr_changed="$(gh pr view "${pr}" --repo "${REPO}" --json changedFiles \
     --jq '.changedFiles')" || [[ ! "${pr_changed}" =~ ^[0-9]+$ ]]; then
