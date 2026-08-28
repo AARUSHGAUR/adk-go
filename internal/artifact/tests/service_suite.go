@@ -213,6 +213,15 @@ func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service
 		}
 	})
 
+	t.Run(fmt.Sprintf("GetArtifactVersionAfterDelete_%s", testSuffix), func(t *testing.T) {
+		got, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
+			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
+		})
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("GetArtifactVersion('file1') = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
+		}
+	})
+
 	// Clean up
 	if err := srv.Delete(ctx, &artifact.DeleteRequest{
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file2",
@@ -368,6 +377,15 @@ func testArtifactService_UserScoped(ctx context.Context, t *testing.T, srv artif
 		})
 		if !errors.Is(err, fs.ErrNotExist) {
 			t.Fatalf("Versions('user:file1') = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
+		}
+	})
+
+	t.Run(fmt.Sprintf("GetArtifactVersionAfterDelete_%s", testSuffix), func(t *testing.T) {
+		got, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
+			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "user:file1",
+		})
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("GetArtifactVersion('user:file1') = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
 		}
 	})
 
