@@ -18,6 +18,7 @@ package api
 import (
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -38,6 +39,9 @@ type apiConfig struct {
 	sseWriteTimeout time.Duration
 	traceCapacity   int
 	includeDebugAPI bool
+	authEnabled     bool
+	authTokens      string
+	maxPayloadSize  int64
 }
 
 // apiLauncher can launch ADK REST API
@@ -94,6 +98,24 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		return fmt.Errorf("failed to create REST server: %w", err)
 	}
 
+	// Apply request-body size limit and (optional) authentication to the
+	// parent router. This also protects routes mounted by other sublaunchers
+	// on the same router (e.g. the PubSub/Eventarc trigger endpoints), since
+	// they would otherwise run agent execution unauthenticated.
+	maxBytes := a.config.maxPayloadSize
+	if maxBytes <= 0 {
+		maxBytes = adkrest.DefaultMaxPayloadSize
+	}
+	router.Use(adkrest.MaxBytesMiddleware(maxBytes))
+	if a.config.authEnabled {
+		router.Use(adkrest.AuthMiddleware(adkrest.AuthConfig{
+			Enabled: true,
+			Tokens:  splitTokens(a.config.authTokens),
+		}))
+	} else {
+		log.Printf("WARNING: ADK web server is running WITHOUT authentication; do not expose it to untrusted networks")
+	}
+
 	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithSpanProcessors(restServer.SpanProcessor()), telemetry.WithLogRecordProcessors(restServer.LogProcessor()))
 
 	// Wrap it with CORS middleware
@@ -148,9 +170,28 @@ func NewLauncher() weblauncher.Sublauncher {
 	fs.DurationVar(&config.sseWriteTimeout, "sse-write-timeout", 120*time.Second, "SSE server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the SSE response after reading the headers & body")
 	fs.IntVar(&config.traceCapacity, "trace_capacity", 10000, "Maximum number of traces to keep in memory.")
 	fs.BoolVar(&config.includeDebugAPI, "include_debug_api", false, "The debug api endpoint will be included in the API if and only if the flag is set to true.")
+	fs.BoolVar(&config.authEnabled, "auth_enabled", false, "Require a valid bearer token (see -auth_tokens) on all non-health API routes.")
+	fs.StringVar(&config.authTokens, "auth_tokens", "", "Comma-separated list of bearer tokens accepted when -auth_enabled is set.")
+	fs.Int64Var(&config.maxPayloadSize, "max_payload_size", 0, "Maximum request body size in bytes (0 = default 10 MiB).")
 
 	return &apiLauncher{
 		config: config,
 		flags:  fs,
 	}
+}
+
+// splitTokens splits a comma-separated token list into a slice, trimming
+// surrounding whitespace and dropping empty entries.
+func splitTokens(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	tokens := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			tokens = append(tokens, t)
+		}
+	}
+	return tokens
 }

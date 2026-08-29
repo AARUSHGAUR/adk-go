@@ -46,6 +46,21 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 	router := mux.NewRouter().StrictSlash(true)
 	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet)
+
+	// Apply request-body size limit to mitigate memory-exhaustion DoS.
+	maxBytes := cfg.MaxPayloadSize
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxPayloadSize
+	}
+	router.Use(MaxBytesMiddleware(maxBytes))
+
+	// Apply authentication when enabled. When disabled, log a warning: an
+	// unauthenticated ADK REST server must not be exposed to untrusted networks.
+	if cfg.Auth.Enabled {
+		router.Use(AuthMiddleware(cfg.Auth))
+	} else {
+		warnNoAuth()
+	}
 	// TODO: Allow taking a prefix to allow customizing the path
 	// where the ADK REST API will be served.
 
@@ -82,6 +97,12 @@ type ServerConfig struct {
 	PluginConfig    runner.PluginConfig
 	DebugConfig     DebugTelemetryConfig
 	DebugAPIConfig  DebugAPIConfig
+	// Auth configures authentication for the server. When Enabled is false the
+	// server runs without authentication and logs a warning.
+	Auth AuthConfig
+	// MaxPayloadSize limits request body size in bytes. If <= 0,
+	// DefaultMaxPayloadSize is used.
+	MaxPayloadSize int64
 }
 
 // DebugAPIConfig contains parameters for the debug API.
