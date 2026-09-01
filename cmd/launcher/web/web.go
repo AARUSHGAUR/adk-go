@@ -21,7 +21,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -180,7 +182,7 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 
 	log.Printf("Starting the web server: %+v", w.config)
 	log.Println()
-	webUrl := fmt.Sprintf("http://localhost:%v", fmt.Sprint(w.config.port))
+	webUrl := w.webURL()
 	log.Printf("Web servers starts on %s", webUrl)
 	for _, l := range w.activeSublaunchers {
 		l.UserMessage(webUrl, log.Println)
@@ -218,9 +220,16 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	}
 }
 
+// webURL returns the user-facing URL for the configured host and port so the
+// startup message reflects the actual bind address (including bracketed IPv6
+// hosts such as "::1").
+func (w *webLauncher) webURL() string {
+	return fmt.Sprintf("http://%s", net.JoinHostPort(w.config.host, strconv.Itoa(w.config.port)))
+}
+
 func (w *webLauncher) buildHTTPServer(handler http.Handler) *http.Server {
 	srv := &http.Server{
-		Addr:         fmt.Sprintf("%s:%v", w.config.host, fmt.Sprint(w.config.port)),
+		Addr:         net.JoinHostPort(w.config.host, strconv.Itoa(w.config.port)),
 		WriteTimeout: w.config.writeTimeout,
 		ReadTimeout:  w.config.readTimeout,
 		IdleTimeout:  w.config.idleTimeout,
@@ -252,7 +261,7 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 	config := &webConfig{}
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
-	fs.StringVar(&config.host, "host", "127.0.0.1", "Host/IP to bind the web server to. Defaults to 127.0.0.1 (loopback only). Use 0.0.0.0 to listen on all interfaces.")
+	fs.StringVar(&config.host, "host", "127.0.0.1", "Host/IP to bind the web server to. Defaults to 127.0.0.1 (loopback only) so the server is not exposed to the network. Use 0.0.0.0 to listen on all interfaces, which may be required when running adk web inside a container.")
 	fs.IntVar(&config.port, "port", 8080, "Port for the web server")
 	fs.DurationVar(&config.writeTimeout, "write-timeout", 15*time.Second, "Server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the response after reading the headers & body")
 	fs.DurationVar(&config.readTimeout, "read-timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")

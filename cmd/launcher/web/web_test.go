@@ -124,25 +124,30 @@ func assertProtocol(t *testing.T, client *http.Client, url string, wantMajor int
 
 func TestHostBinding(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		args     []string
-		wantHost string
+		name       string
+		args       []string
+		wantPrefix string
 	}{
 		{
 			// The web server must default to loopback-only so it cannot
 			// accidentally be exposed to the network.
-			name:     "loopback by default",
-			wantHost: "127.0.0.1",
+			name:       "loopback by default",
+			wantPrefix: "127.0.0.1:",
 		},
 		{
-			name:     "explicit loopback",
-			args:     []string{"--host", "127.0.0.1"},
-			wantHost: "127.0.0.1",
+			name:       "explicit loopback",
+			args:       []string{"--host", "127.0.0.1"},
+			wantPrefix: "127.0.0.1:",
 		},
 		{
-			name:     "all interfaces",
-			args:     []string{"--host", "0.0.0.0"},
-			wantHost: "0.0.0.0",
+			name:       "all interfaces",
+			args:       []string{"--host", "0.0.0.0"},
+			wantPrefix: "0.0.0.0:",
+		},
+		{
+			name:       "IPv6 loopback",
+			args:       []string{"--host", "::1"},
+			wantPrefix: "[::1]:",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -153,8 +158,29 @@ func TestHostBinding(t *testing.T) {
 			srv := launcher.buildHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusNoContent)
 			}))
-			if got, want := srv.Addr, tc.wantHost+":"; !strings.HasPrefix(got, want) {
+			if got, want := srv.Addr, tc.wantPrefix; !strings.HasPrefix(got, want) {
 				t.Errorf("server Addr = %q, want host prefix %q", got, want)
+			}
+		})
+	}
+}
+
+func TestWebURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		host string
+		port int
+		want string
+	}{
+		{name: "localhost", host: "localhost", port: 8080, want: "http://localhost:8080"},
+		{name: "IPv4 loopback", host: "127.0.0.1", port: 8080, want: "http://127.0.0.1:8080"},
+		{name: "all interfaces", host: "0.0.0.0", port: 8080, want: "http://0.0.0.0:8080"},
+		{name: "IPv6 loopback", host: "::1", port: 8080, want: "http://[::1]:8080"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &webLauncher{config: &webConfig{host: tc.host, port: tc.port}}
+			if got := w.webURL(); got != tc.want {
+				t.Errorf("webURL() = %q, want %q", got, tc.want)
 			}
 		})
 	}
