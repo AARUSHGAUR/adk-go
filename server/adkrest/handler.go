@@ -73,6 +73,13 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 	router := mux.NewRouter().StrictSlash(true)
 	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet)
+
+	// Apply request-body size limit to mitigate memory-exhaustion DoS.
+	maxBytes := cfg.MaxPayloadSize
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxPayloadSize
+	}
+	router.Use(MaxBytesMiddleware(maxBytes))
 	// TODO: Allow taking a prefix to allow customizing the path
 	// where the ADK REST API will be served.
 
@@ -134,6 +141,9 @@ type ServerConfig struct {
 	// different applications need different compaction, or must not share a
 	// summarizer, run them on separate servers.
 	Compaction *compaction.Config
+	// MaxPayloadSize limits request body size in bytes. If <= 0,
+	// DefaultMaxPayloadSize is used.
+	MaxPayloadSize int64
 }
 
 // DebugAPIConfig contains parameters for the debug API.
