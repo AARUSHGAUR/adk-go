@@ -18,6 +18,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -118,5 +119,43 @@ func assertProtocol(t *testing.T, client *http.Client, url string, wantMajor int
 	}
 	if resp.ProtoMajor != wantMajor {
 		t.Errorf("response protocol = %q, want HTTP/%d", resp.Proto, wantMajor)
+	}
+}
+
+func TestHostBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantHost string
+	}{
+		{
+			// The web server must default to loopback-only so it cannot
+			// accidentally be exposed to the network.
+			name:     "loopback by default",
+			wantHost: "127.0.0.1",
+		},
+		{
+			name:     "explicit loopback",
+			args:     []string{"--host", "127.0.0.1"},
+			wantHost: "127.0.0.1",
+		},
+		{
+			name:     "all interfaces",
+			args:     []string{"--host", "0.0.0.0"},
+			wantHost: "0.0.0.0",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			launcher := NewLauncher().(*webLauncher)
+			if _, err := launcher.Parse(tc.args); err != nil {
+				t.Fatalf("Parse(%v) failed: %v", tc.args, err)
+			}
+			srv := launcher.buildHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			if got, want := srv.Addr, tc.wantHost+":"; !strings.HasPrefix(got, want) {
+				t.Errorf("server Addr = %q, want host prefix %q", got, want)
+			}
+		})
 	}
 }

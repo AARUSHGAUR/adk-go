@@ -37,6 +37,7 @@ import (
 // webConfig contains parameters for launching web server
 type webConfig struct {
 	port            int
+	host            string
 	writeTimeout    time.Duration
 	readTimeout     time.Duration
 	idleTimeout     time.Duration
@@ -219,7 +220,7 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 
 func (w *webLauncher) buildHTTPServer(handler http.Handler) *http.Server {
 	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%v", fmt.Sprint(w.config.port)),
+		Addr:         fmt.Sprintf("%s:%v", w.config.host, fmt.Sprint(w.config.port)),
 		WriteTimeout: w.config.writeTimeout,
 		ReadTimeout:  w.config.readTimeout,
 		IdleTimeout:  w.config.idleTimeout,
@@ -251,7 +252,8 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 	config := &webConfig{}
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
-	fs.IntVar(&config.port, "port", 8080, "Localhost port for the server")
+	fs.StringVar(&config.host, "host", "127.0.0.1", "Host/IP to bind the web server to. Defaults to 127.0.0.1 (loopback only). Use 0.0.0.0 to listen on all interfaces.")
+	fs.IntVar(&config.port, "port", 8080, "Port for the web server")
 	fs.DurationVar(&config.writeTimeout, "write-timeout", 15*time.Second, "Server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the response after reading the headers & body")
 	fs.DurationVar(&config.readTimeout, "read-timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")
 	fs.DurationVar(&config.idleTimeout, "idle-timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")
