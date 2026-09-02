@@ -223,8 +223,27 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 // webURL returns the user-facing URL for the configured host and port so the
 // startup message reflects the actual bind address (including bracketed IPv6
 // hosts such as "::1").
+//
+// The loopback hosts 127.0.0.1, ::1, 0.0.0.0 and :: are normalized to
+// "localhost" in the URL shown/opened to the user. The ADK Web UI is served
+// from http://localhost:8080/api, so presenting the server as
+// http://127.0.0.1:8080 would be a different browser origin and fail CORS.
+// This changes only the displayed URL - it does not change the server bind
+// address, which is controlled by the -host flag and used by buildHTTPServer.
 func (w *webLauncher) webURL() string {
-	return fmt.Sprintf("http://%s", net.JoinHostPort(w.config.host, strconv.Itoa(w.config.port)))
+	host := displayHost(w.config.host)
+	return fmt.Sprintf("http://%s", net.JoinHostPort(host, strconv.Itoa(w.config.port)))
+}
+
+// displayHost maps loopback-ish listen hosts to "localhost" for the URL shown
+// to the user, and otherwise returns the host unchanged. See webURL.
+func displayHost(host string) string {
+	switch host {
+	case "127.0.0.1", "::1", "0.0.0.0", "::":
+		return "localhost"
+	default:
+		return host
+	}
 }
 
 func (w *webLauncher) buildHTTPServer(handler http.Handler) *http.Server {
