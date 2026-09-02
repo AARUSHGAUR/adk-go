@@ -28,9 +28,16 @@ import (
 	"google.golang.org/adk/v2/cmd/launcher"
 )
 
-// fakeTriggerSublauncher mounts a PubSub-style trigger endpoint that decodes the
-// request body as JSON, mirroring how the Eventarc and PubSub trigger
-// sublaunchers register their routes via SetupSubrouters on the base router.
+// fakeTriggerSublauncher stands in for a trigger sublauncher (PubSub,
+// Eventarc). It mounts a trigger endpoint that decodes the request body as
+// JSON, mirroring how the real triggers register their routes via
+// SetupSubrouters on the base router.
+//
+// The fake returns 400 when the body fails to decode, like the PubSub trigger;
+// the Eventarc trigger returns 500 instead. The status code of any single
+// trigger is not what this test asserts - it exists only so an oversize-body
+// read failure is observable. What is under test is that the base-router
+// body-limit middleware covers routes that sublaunchers mount.
 type fakeTriggerSublauncher struct{}
 
 func (f fakeTriggerSublauncher) Keyword() string                    { return "faketrigger" }
@@ -54,7 +61,16 @@ func (f fakeTriggerSublauncher) SetupSubrouters(router *mux.Router, _ *launcher.
 	return nil
 }
 
-func TestBuildRouterEnforcesBodyLimitOnSublauncherTriggerRoutes(t *testing.T) {
+// TestBuildRouterAppliesBodyLimitMiddlewareToSublauncherTriggerRoutes verifies
+// that the body-limit middleware on the base router covers trigger routes
+// mounted by sublaunchers, not just routes registered directly on the base
+// router.
+//
+// It doubles as a regression test for the middleware itself: this test fails
+// if the router.Use(MaxBytesMiddleware(...)) line is removed from buildRouter,
+// because the oversized body below is valid JSON and would decode successfully
+// (204) instead of tripping http.MaxBytesReader.
+func TestBuildRouterAppliesBodyLimitMiddlewareToSublauncherTriggerRoutes(t *testing.T) {
 	sub := fakeTriggerSublauncher{}
 	w := &webLauncher{
 		flags:              flag.NewFlagSet("web", flag.ContinueOnError),
@@ -75,10 +91,10 @@ func TestBuildRouterEnforcesBodyLimitOnSublauncherTriggerRoutes(t *testing.T) {
 		t.Fatalf("small request: got status %d, want %d (%s)", smallRec.Code, http.StatusNoContent, smallRec.Body.String())
 	}
 
-	// An oversized body trips http.MaxBytesReader, which the trigger handler
-	// surfaces as a 400 containing "http: request body too large". If the
-	// base-router body-limit middleware is removed, this request would decode
-	// successfully and return 204 instead, so this test fails on regression.
+	// An oversized body trips http.MaxBytesReader, so this sublauncher's
+	// handler (which reads the body) observes a decode error. Without the
+	// base-router middleware, the same body would decode fine and this request
+	// would return 204, so the test fails on regression.
 	oversized := `{"message":{"data":"` + strings.Repeat("a", 8192) + `"}}`
 	oversizedRec := httptest.NewRecorder()
 	router.ServeHTTP(oversizedRec, httptest.NewRequest(http.MethodPost, "/api/apps/my-app/trigger/pubsub", strings.NewReader(oversized)))
@@ -87,5 +103,53 @@ func TestBuildRouterEnforcesBodyLimitOnSublauncherTriggerRoutes(t *testing.T) {
 	}
 	if !strings.Contains(oversizedRec.Body.String(), "http: request body too large") {
 		t.Fatalf("oversized request: got body %q, want mention of %q", oversizedRec.Body.String(), "http: request body too large")
+	}
+}
+
+// recordingSublauncher records the launcher.Config it receives during router
+// setup so tests can assert on the configuration the web launcher threads
+// through to sublaunchers.
+type recordingSublauncher struct{ maxPayloadSize int64 }
+
+func (r *recordingSublauncher) Keyword() string                        { return "recording" }
+func (r *recordingSublauncher) Parse(_ []string) ([]string, error)     { return nil, nil }
+func (r *recordingSublauncher) CommandLineSyntax() string              { return "recording" }
+func (r *recordingSublauncher) SimpleDescription() string              { return "recording sublauncher" }
+func (r *recordingSublauncher) UserMessage(_ string, _ func(v ...any)) {}
+
+func (r *recordingSublauncher) SetupSubrouters(_ *mux.Router, config *launcher.Config) error {
+	r.maxPayloadSize = config.MaxPayloadSize
+	return nil
+}
+
+// TestBuildRouterPropagatesMaxPayloadSizeToSublaunchers verifies that
+// buildRouter threads the web launcher's configured max_payload_size into the
+// launcher.Config it hands to sublaunchers, so the ADK REST API sublauncher
+// can apply the same limit as the base router instead of the default.
+func TestBuildRouterPropagatesMaxPayloadSizeToSublaunchers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		web  int64
+		want int64
+	}{
+		{name: "raised", web: int64(20 << 20), want: int64(20 << 20)},
+		{name: "default", web: 0, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := &recordingSublauncher{}
+			w := &webLauncher{
+				flags:              flag.NewFlagSet("web", flag.ContinueOnError),
+				config:             &webConfig{maxPayloadSize: tc.web},
+				sublaunchers:       []Sublauncher{sub},
+				activeSublaunchers: map[string]Sublauncher{sub.Keyword(): sub},
+			}
+
+			if _, err := w.buildRouter(&launcher.Config{}); err != nil {
+				t.Fatalf("buildRouter() error = %v", err)
+			}
+			if got := sub.maxPayloadSize; got != tc.want {
+				t.Fatalf("config.MaxPayloadSize = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

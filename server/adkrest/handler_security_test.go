@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -52,5 +52,43 @@ func TestServerRejectsOversizedBody(t *testing.T) {
 	}
 	if got, want := rec.Body.String(), "http: request body too large\n"; got != want {
 		t.Fatalf("oversized body response = %q, want %q", got, want)
+	}
+}
+
+// TestServerUsesDefaultMaxPayloadSize verifies that a MaxPayloadSize of 0 or
+// below falls back to DefaultMaxPayloadSize: a body just above that default is
+// rejected even though no explicit limit was configured.
+func TestServerUsesDefaultMaxPayloadSize(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		max  int64
+	}{
+		{name: "zero", max: 0},
+		{name: "negative", max: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, err := adkrest.NewServer(adkrest.ServerConfig{
+				SessionService: session.InMemoryService(),
+				MaxPayloadSize: tc.max,
+			})
+			if err != nil {
+				t.Fatalf("NewServer: %v", err)
+			}
+
+			// A valid JSON body slightly larger than the 10 MiB default. It is
+			// rejected only if the default limit is actually applied.
+			payload := fmt.Sprintf(`{"state": {"padding": %q}}`, strings.Repeat("a", int(adkrest.DefaultMaxPayloadSize)+4096))
+			req := httptest.NewRequest(http.MethodPost, "/apps/myapp/users/u1/sessions", bytes.NewBufferString(payload))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+
+			if got, want := rec.Code, http.StatusBadRequest; got != want {
+				t.Fatalf("oversized body status = %d, want %d", got, want)
+			}
+			if got, want := rec.Body.String(), "http: request body too large\n"; got != want {
+				t.Fatalf("oversized body response = %q, want %q", got, want)
+			}
+		})
 	}
 }

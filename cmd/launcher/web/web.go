@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -211,6 +211,11 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 func (w *webLauncher) buildRouter(config *launcher.Config) (*mux.Router, error) {
 	router := BuildBaseRouter()
 	router.Use(adkrest.MaxBytesMiddleware(w.maxPayloadBytes()))
+
+	// Thread the web launcher's configured limit through to sublaunchers so the
+	// ADK REST API server applies the same limit as the base router instead of
+	// its 10 MiB default. A value <= 0 keeps the default behavior in adkrest.
+	config.MaxPayloadSize = w.config.maxPayloadSize
 
 	// check if there are any active sublaunchers
 	if len(w.activeSublaunchers) == 0 {

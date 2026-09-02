@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -72,14 +72,16 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	router := mux.NewRouter().StrictSlash(true)
-	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet)
 
-	// Apply request-body size limit to mitigate memory-exhaustion DoS.
+	// Apply request-body size limit to mitigate memory-exhaustion DoS before
+	// any routes (including /health) are registered.
 	maxBytes := cfg.MaxPayloadSize
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxPayloadSize
 	}
 	router.Use(MaxBytesMiddleware(maxBytes))
+
+	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet)
 	// TODO: Allow taking a prefix to allow customizing the path
 	// where the ADK REST API will be served.
 
